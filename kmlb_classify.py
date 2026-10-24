@@ -120,7 +120,10 @@ def read_volume(raw, key):
     with tempfile.NamedTemporaryFile(suffix=os.path.basename(key)) as fp:
         fp.write(raw)
         fp.flush()
-        radar = pyart.io.read_nexrad_archive(fp.name)
+        # Only the two fields the hybrid uses: a full NEXRAD volume with all seven fields is
+        # ~450 MB in memory, and the climatology runs four processes per runner.
+        radar = pyart.io.read_nexrad_archive(
+            fp.name, include_fields=["reflectivity", "cross_correlation_ratio"])
     return from_radar(radar, key)
 
 
