@@ -1,0 +1,25 @@
+name: KMLB probe 2 (manual, one-off)
+
+# Follow-up to probe_kmlb: elevation coverage, IGRA2 detail, codiapi history start, GLM archive
+# start. Needs probe_kmlb.py and probe_kmlb2.py in the repo root.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q arm_pyart requests
+      - run: python probe_kmlb2.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kmlb-probe-2
+          path: |
+            probe_kmlb2_report.txt
+            probe_kmlb2.json
