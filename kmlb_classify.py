@@ -27,10 +27,19 @@ WHAT COMES FROM WHERE
     3-D volume      KMLB below its top beam, MRMS above (newest frame); the Steiner level likewise
 
 QUALITY CONTROL
-    MRMS's merged reflectivity is quality-controlled; raw KMLB is not. Insects, birds, sea clutter
-    and anomalous propagation sit low and have low RHOHV, so gates below QC_MAX_KM with RHOHV below
-    QC_RHO and Z below QC_KEEP_DBZ are treated as no echo. Above QC_MAX_KM nothing is removed: weak
-    anvil edges have noisy, low RHOHV and must not be thrown away.
+    MRMS's merged reflectivity is quality-controlled; raw KMLB is not. Three screens, in order:
+      1. Below QC_MAX_KM, Z under QC_KEEP_DBZ and RHOHV under QC_RHO: insects, birds, sea clutter,
+         anomalous propagation.
+      2. Below QC_MAX_KM, Z under QC_NORHO_DBZ and RHOHV MISSING. NEXRAD withholds RHOHV at
+         low-SNR gates, and a missing value never compares as "below 0.8" - on 24 Oct 2026 the
+         first live frames were full of weak clear-air speckle over the pads that passed screen 1.
+      3. Speckle, at every height: 8-connected echo patches of fewer than SPECKLE_GATES gates whose
+         peak is under SPECKLE_KEEP_DBZ. Small but strong cells are kept; broad weak anvils are
+         never small.
+    All three run on each sweep's own ray x gate array, BEFORE sampling onto the map: far out a
+    beam is wider than a map cell, so one stray gate maps onto a 2 x 2 block of cells and a
+    cell-count threshold misses it. Above QC_MAX_KM only screen 3 acts: weak anvil edges have
+    noisy, low RHOHV and must stay.
 
 Run: OUT_DIR=site python kmlb_classify.py
 """
@@ -55,6 +64,8 @@ MID_EST_MIN = 2.5                     # scan midpoint ~ start + 2.5 min (VCP 212
 AE = 6371000.0 * 4.0 / 3.0            # 4/3-earth radius, m
 HALF_BEAM_DEG = 0.475                 # half the 0.95 deg half-power beamwidth
 QC_RHO, QC_MAX_KM, QC_KEEP_DBZ = 0.80, 3.0, 35.0
+QC_NORHO_DBZ = 20.0                   # screen 2: weaker than this with no RHOHV, below QC_MAX_KM
+SPECKLE_GATES, SPECKLE_KEEP_DBZ = 20, 20.0  # screen 3: < 20 gates (~2.4 km2 at the pads), peak < 20 dBZ
 FULL_KM = 15.0                        # KMLB "samples the column" if its top beam reaches this
 VII_FLOOR = 0.5                       # kg/m2
 LAYER_SUPER_M = (10058.0, 18288.0)    # 33-60 kft
@@ -166,13 +177,48 @@ def beam(el_deg, s_m, alt_m):
     return h, r, r * np.tan(np.radians(HALF_BEAM_DEG))
 
 
+def qc_sweep(sw, alt_m):
+    """The three QC screens on one sweep's ray x gate reflectivity. Returns (clean z, tally of
+    gates removed by each screen)."""
+    from scipy import ndimage
+    z = sw["z"].copy()
+    rng = sw["rng"]
+    e = np.radians(sw["el"])
+    h_agl = np.sqrt(rng ** 2 + AE ** 2 + 2 * rng * AE * np.sin(e)) - AE     # per gate, m above radar
+    low = np.broadcast_to(h_agl < QC_MAX_KM * 1000.0, z.shape)
+    echo = np.isfinite(z)
+    if sw["rho"] is not None:
+        rho = sw["rho"]
+        j1 = echo & low & (z < QC_KEEP_DBZ) & (rho < QC_RHO)
+        j2 = echo & low & (z < QC_NORHO_DBZ) & ~np.isfinite(rho)
+    else:
+        j1 = np.zeros(z.shape, bool)
+        j2 = echo & low & (z < QC_NORHO_DBZ)
+    z[j1 | j2] = np.nan
+    lab, n = ndimage.label(np.isfinite(z), structure=np.ones((3, 3), bool))
+    drop = np.zeros(z.shape, bool)
+    if n:
+        size = np.bincount(lab.ravel())[1:]
+        peak = np.asarray(ndimage.maximum(np.nan_to_num(z, nan=-999.0), lab, np.arange(1, n + 1)))
+        small = (size < SPECKLE_GATES) & (peak < SPECKLE_KEEP_DBZ)
+        drop = (lab > 0) & small[np.maximum(lab - 1, 0)]
+        z[drop] = np.nan
+    return z, {"echo": int(echo.sum()), "low_rhohv": int(j1.sum()), "no_rhohv": int(j2.sum()),
+               "speckle": int(drop.sum())}
+
+
 def sample_sweeps(vol, la, lo):
-    """Each sweep sampled at every map column (nearest ray and gate). Returns Z, H, W of shape
-    (K, ny, nx): dBZ (NO_ECHO = sampled, nothing there; NaN = this sweep does not reach the
-    column), beam-centre height MSL and half beam width, both m. QC as in the module notes."""
+    """Each sweep, QC'd in its own ray x gate space (qc_sweep), then sampled at every map column
+    (nearest ray and gate). Returns Z, H, W of shape (K, ny, nx) and a QC tally in GATES summed
+    over sweeps: dBZ (NO_ECHO = sampled, nothing there; NaN = this sweep does not reach the
+    column), beam-centre height MSL and half beam width, both m."""
     s, az = column_geometry(la, lo, vol["lat"], vol["lon"])
     Z, H, W = [], [], []
+    qc = {"echo": 0, "low_rhohv": 0, "no_rhohv": 0, "speckle": 0}
     for sw in vol["sweeps"]:
+        zc, t = qc_sweep(sw, vol["alt"])
+        for k_, v_ in t.items():
+            qc[k_] += v_
         h, r, w = beam(sw["el"], s, vol["alt"])
         order = np.argsort(sw["az"])
         azs = sw["az"][order]
@@ -185,17 +231,12 @@ def sample_sweeps(vol, la, lo):
         dr = float(rng[1] - rng[0])
         g = np.round((r - rng[0]) / dr).astype(np.int64)
         ok = (g >= 0) & (g < rng.size)
-        gc = np.clip(g, 0, rng.size - 1)
-        z = sw["z"][ray, gc].astype(np.float32)
-        if sw["rho"] is not None:
-            rho = sw["rho"][ray, gc]
-            junk = ((h - vol["alt"]) < QC_MAX_KM * 1000.0) & (rho < QC_RHO) & (z < QC_KEEP_DBZ)
-            z = np.where(junk, np.nan, z)
+        z = zc[ray, np.clip(g, 0, rng.size - 1)].astype(np.float32)
         z = np.where(np.isfinite(z), z, NO_ECHO)
         Z.append(np.where(ok, z, np.nan))
         H.append(h)
         W.append(w)
-    return np.stack(Z), np.stack(H), np.stack(W)
+    return np.stack(Z), np.stack(H), np.stack(W), qc
 
 
 def at_heights(Z, H, W, target):
@@ -249,7 +290,7 @@ def vii_from(levels_m, K, h10, h40):
 class KmlbFrame:
     def __init__(self, vol, la, lo, iso, z0, valid_iso):
         self.vol, self.la, self.lo = vol, la, lo
-        self.Z, self.H, self.W = sample_sweeps(vol, la, lo)
+        self.Z, self.H, self.W, self.qc = sample_sweeps(vol, la, lo)
         self.top = top_edge(self.Z, self.H, self.W)
         self.levels_m = np.array(STD_LEVELS_KM) * 1000.0
         self.Kstd = np.stack([at_heights(self.Z, self.H, self.W, h) for h in self.levels_m])
@@ -264,7 +305,10 @@ class KmlbFrame:
             "top_deg": vol["top_deg"], "lc39a_top_km": round(top39, 1) if top39 else None,
             "mid": vol["mid"].strftime("%H:%M:%SZ"),
             "offset_min": round((vol["mid"] - vt).total_seconds() / 60.0, 1),
-            "qc": f"RHOHV < {QC_RHO} below {QC_MAX_KM:g} km and under {QC_KEEP_DBZ:g} dBZ removed",
+            "qc": (f"below {QC_MAX_KM:g} km: RHOHV < {QC_RHO} under {QC_KEEP_DBZ:g} dBZ, or no RHOHV "
+                   f"under {QC_NORHO_DBZ:g} dBZ; everywhere: patches < {SPECKLE_GATES} gates under "
+                   f"{SPECKLE_KEEP_DBZ:g} dBZ"),
+            "qc_removed": self.qc,
         }
         self.used = {}
 
@@ -375,7 +419,9 @@ class Hybrid:
         fr = KmlbFrame(vol, la, lo, iso, z0, valid_iso)
         logging.info(f"KMLB: {fr.info['volume']} VCP {fr.info['vcp']} to {fr.info['top_deg']} deg, "
                      f"LC-39A sampled to {fr.info['lc39a_top_km']} km ({fr.info['mode']}), "
-                     f"midpoint {fr.info['offset_min']:+.1f} min from the frame")
+                     f"midpoint {fr.info['offset_min']:+.1f} min from the frame; QC removed "
+                     f"{fr.qc['low_rhohv']} low-RHOHV, {fr.qc['no_rhohv']} no-RHOHV, "
+                     f"{fr.qc['speckle']} speckle of {fr.qc['echo']} echo gates")
         return fr
 
     @staticmethod
