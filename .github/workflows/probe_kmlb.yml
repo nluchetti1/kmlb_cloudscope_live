@@ -1,0 +1,32 @@
+name: KMLB probe (manual, one-off)
+
+# Validates KMLB Level II, XMR soundings and codiapi archive depth from a real Actions runner.
+# Actions tab -> "KMLB probe" -> Run workflow. The report prints in the log and is attached as an
+# artifact. Put probe_kmlb.py in the repo root (any repo - a new KMLB repo is the natural home).
+on:
+  workflow_dispatch:
+    inputs:
+      grid:
+        description: "Also time Py-ART's 3-D gridder (adds ~1-2 min)"
+        type: boolean
+        default: true
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q arm_pyart requests
+      - name: Probe
+        run: python probe_kmlb.py ${{ inputs.grid && '--grid' || '' }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kmlb-probe
+          path: |
+            probe_kmlb_report.txt
+            probe_kmlb.json
