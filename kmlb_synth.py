@@ -7,6 +7,7 @@ LA = np.round(29.595 - 0.01 * np.arange(200), 3)
 LO = np.round(-81.595 + 0.01 * np.arange(200), 3)
 STORM = (28.60, -80.60)          # ~54 km from KMLB, beside the pads
 CLUTTER = (28.20, -80.65)        # ~10 km north of KMLB
+STRONG = (2838, -8071)           # map cell (floor of lat*100, lon*100): a lone 30 dBZ low cell
 
 def truth(lat, lon, h):
     """Storm: 50 dBZ core, -2.5 dBZ/km outward, -2 dBZ per km up, top 12 km, radius 15 km.
@@ -21,6 +22,18 @@ def truth(lat, lon, h):
     clut = (rc < 6) & (h < 800)
     z = np.where(clut, 15.0, z)
     rho = np.where(clut, 0.5, np.where(anvil, 0.6, 0.98))
+    # 24 Oct 2026 speckle: isolated single map cells of weak echo near the pads with RHOHV
+    # withheld (NaN), weak isolated cells aloft, and one lone strong low cell that must survive.
+    ci, cj = np.floor(lat * 100).astype(int), np.floor(lon * 100).astype(int)   # = map cells
+    iso = ((ci * 7 + cj * 13) % 23 == 0)
+    pads = (lat > 28.30) & (lat < 28.45) & (lon > -80.75) & (lon < -80.55) & (h < 1500) & iso
+    z = np.where(pads, 8.0, z)
+    rho = np.where(pads, np.nan, rho)
+    aloft = (lat > 29.20) & (lat < 29.50) & (lon > -81.20) & (lon < -80.90) & (h > 7000) & (h < 9000) & iso
+    z = np.where(aloft & ~np.isfinite(z), 5.0, z)
+    lone = (ci == STRONG[0]) & (cj == STRONG[1]) & (h < 2000)
+    z = np.where(lone, 30.0, z)
+    rho = np.where(lone, 0.98, rho)
     return z, rho
 
 def synth_volume(elevs, start=dt.datetime(2025, 7, 31, 16, 5, 2)):
