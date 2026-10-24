@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """One-off check of the real KMLB path before the page goes live: download a real volume, read it
 with Py-ART, sample it onto the map and report what the hybrid would use. Default: the Crew-11
-scrub volume (31 Jul 2025 16:05Z, AVSET off).   python kmlb_validate.py [YYYY-MM-DDTHH:MM]"""
+scrub volume (31 Jul 2025 16:05Z, AVSET off). Try 2026-10-24T15:22 for the speckle case.
+    python kmlb_validate.py [YYYY-MM-DDTHH:MM]"""
 import datetime as dt
 import sys
 import time
@@ -29,10 +30,13 @@ for name, h in (("0 C (4.8 km)", 4800.0), ("-10 C (6.3 km)", 6338.0), ("-20 C (7
     vn = v[near]
     print(f"  {name:15} within 10 nmi of LC-39A: sampled {np.isfinite(vn).mean():5.0%}, "
           + (f"echo {np.nanmax(np.where(vn > -99, vn, np.nan)):.1f} dBZ max" if (vn > -99).any() else "no echo"))
-# QC: how much low-level echo the RHOHV screen removes
-low = [sw for sw in vol["sweeps"] if sw["el"] <= 0.6][0]
-z, rho = low["z"], low["rho"]
-gates = np.isfinite(z) & (z >= 0)
-junk = gates & (rho < K.QC_RHO) & (z < K.QC_KEEP_DBZ)
-print(f"0.5 deg sweep: {gates.sum()} gates with echo, {junk.sum()} ({junk.sum()/max(gates.sum(),1):.0%}) "
-      f"have RHOHV < {K.QC_RHO} and < {K.QC_KEEP_DBZ:g} dBZ (removed when below {K.QC_MAX_KM:g} km)")
+# QC: what each screen removed, and low-level echo near the pads with the screens off vs on
+print(f"QC removed (gates, all sweeps): {fr.qc}")
+saved = (K.QC_RHO, K.QC_NORHO_DBZ, K.SPECKLE_GATES)
+K.QC_RHO, K.QC_NORHO_DBZ, K.SPECKLE_GATES = -1.0, -999.0, 0
+Zr, Hr, Wr, _ = K.sample_sweeps(vol, la, lo)
+K.QC_RHO, K.QC_NORHO_DBZ, K.SPECKLE_GATES = saved
+for name, (Z_, H_, W_) in (("screens off", (Zr, Hr, Wr)), ("screens on ", (fr.Z, fr.H, fr.W))):
+    lo1 = K.at_heights(Z_, H_, W_, 1000.0)
+    print(f"  {name}: echo cells within 10 nmi of LC-39A at 1 km: {int(((lo1 > -99) & near).sum())} "
+          f"of {int((np.isfinite(lo1) & near).sum())} sampled")
