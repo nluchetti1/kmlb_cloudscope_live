@@ -1,0 +1,38 @@
+name: KMLB probe 3 (manual) - AVSET-off volumes
+
+# Actions tab -> "KMLB probe 3" -> Run workflow. Enter launch windows (UTC, space-separated,
+# START/END) or leave blank and set days for an hourly sample. Needs probe_kmlb.py and
+# probe_kmlb3.py in the repo root.
+on:
+  workflow_dispatch:
+    inputs:
+      windows:
+        description: "UTC windows, e.g. 2026-10-20T14:00/2026-10-20T18:00 2026-10-22T02:00/2026-10-22T05:00"
+        required: false
+        default: ""
+      days:
+        description: "If no windows: hourly sample over this many days"
+        required: false
+        default: "14"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q arm_pyart requests
+      - name: Probe
+        env:
+          WINDOWS: ${{ inputs.windows }}
+          DAYS: ${{ inputs.days }}
+        run: |
+          if [ -n "$WINDOWS" ]; then python probe_kmlb3.py $WINDOWS; else python probe_kmlb3.py --days "$DAYS"; fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kmlb-probe-3
+          path: probe_kmlb3_report.txt
