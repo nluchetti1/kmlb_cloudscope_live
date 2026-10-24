@@ -1,0 +1,26 @@
+name: KMLB probe 4 (manual) - dual-pol chain
+
+# Needs probe_kmlb.py and probe_kmlb4.py in the repo root. Actions tab -> "KMLB probe 4".
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -q arm_pyart requests
+      # CSU_RadarTools: its own step so a failed install is visible but does not stop the probe
+      - name: Install CSU_RadarTools
+        continue-on-error: true
+        run: pip install -q csu_radartools || pip install -q "git+https://github.com/CSU-Radarmet/CSU_RadarTools.git"
+      - run: python probe_kmlb4.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kmlb-probe-4
+          path: probe_kmlb4_report.txt
