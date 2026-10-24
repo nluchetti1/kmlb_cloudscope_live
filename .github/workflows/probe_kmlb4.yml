@@ -3,6 +3,11 @@ name: KMLB probe 4 (manual) - dual-pol chain
 # Needs probe_kmlb.py and probe_kmlb4.py in the repo root. Actions tab -> "KMLB probe 4".
 on:
   workflow_dispatch:
+    inputs:
+      at:
+        description: "UTC time of the volume to test, e.g. 2025-07-31T16:05 (blank = the 20 Oct 2026 volumes)"
+        required: false
+        default: ""
 
 jobs:
   probe:
@@ -18,7 +23,10 @@ jobs:
       - name: Install CSU_RadarTools
         continue-on-error: true
         run: pip install -q csu_radartools || pip install -q "git+https://github.com/CSU-Radarmet/CSU_RadarTools.git"
-      - run: python probe_kmlb4.py
+      - name: Probe
+        env:
+          AT: ${{ inputs.at }}
+        run: if [ -n "$AT" ]; then python probe_kmlb4.py --at "$AT"; else python probe_kmlb4.py; fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
