@@ -26,7 +26,7 @@ check(abs(h / 1000 - 19.7) < 0.3, f"19.5 deg beam centre at 55 km: {h/1000:.1f} 
 
 print("== full volume")
 v = synth_volume(FULL)
-Z, H, W = K.sample_sweeps(v, LA, LO)
+Z, H, W, QC = K.sample_sweeps(v, LA, LO)
 for hgt in (3000.0, 4800.0, 7900.0, 10000.0):
     got = K.at_heights(Z, H, W, hgt)[j, i]
     exp = 50 - 2.5 * 0 - 2.0 * hgt / 1000
@@ -46,9 +46,23 @@ check(abs(K.at_heights(Z, H, W, float(H[ka, ja, ia]))[ja, ia] - 2.0) < 0.01, "an
 check(K.at_heights(Z, H, W, 600.0)[jc, ic] == K.NO_ECHO, f"low clutter (15 dBZ, RHOHV 0.5) removed: {K.at_heights(Z, H, W, 600.0)[jc, ic]}")
 check(np.isnan(K.at_heights(Z, H, W, 16000.0)[jc, ic]), "cone of silence: 16 km over the radar not sampled (MRMS fills)")
 
+print("== QC screens (24 Oct 2026 speckle)")
+LOg, LAg = np.meshgrid(LO, LA)
+padbox = (LAg > 28.30) & (LAg < 28.45) & (LOg > -80.75) & (LOg < -80.55)
+js, is_ = np.argwhere((np.floor(LAg * 100) == 2838) & (np.floor(LOg * 100) == -8071))[0]
+low = K.at_heights(Z, H, W, 800.0)
+left = padbox & (low > K.NO_ECHO) & ~((np.arange(200)[:, None] == js) & (np.arange(200)[None, :] == is_))
+check(QC["no_rhohv"] > 0 and left.sum() == 0, f"pad speckle with RHOHV withheld: {QC["no_rhohv"]} gates removed, {int(left.sum())} left at 0.8 km")
+check(K.at_heights(Z, H, W, 800.0)[js, is_] > 25, f"lone 30 dBZ cell kept by the speckle screen: {K.at_heights(Z, H, W, 800.0)[js, is_]:.1f} dBZ")
+abox = (LAg > 29.20) & (LAg < 29.50) & (LOg > -81.20) & (LOg < -80.90)
+a8 = K.at_heights(Z, H, W, 8000.0)
+check(QC["speckle"] > 0 and (abox & (a8 > K.NO_ECHO)).sum() == 0, f"weak isolated echo aloft removed as speckle ({QC['speckle']} gates over all sweeps)")
+check(QC["low_rhohv"] > 0, f"low-RHOHV clutter screen still active: {QC["low_rhohv"]} gates")
+print(f"   tally: {QC}")
+
 print("== truncated volume (AVSET at 6.4 deg)")
 vt = synth_volume(TRUNC)
-Zt, Ht, Wt = K.sample_sweeps(vt, LA, LO)
+Zt, Ht, Wt, QCt = K.sample_sweeps(vt, LA, LO)
 tt = K.top_edge(Zt, Ht, Wt)
 check(6.5 < tt[j, i] / 1000 < 7.2, f"storm column (~54 km) sampled only to {tt[j,i]/1000:.2f} km")
 check(np.isnan(K.at_heights(Zt, Ht, Wt, 7900.0)[j, i]), "-20 C height (7.9 km) at the storm: not sampled -> MRMS")
