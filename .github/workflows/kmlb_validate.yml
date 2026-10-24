@@ -1,0 +1,31 @@
+name: KMLB validate (manual, one-off)
+
+# Reads a real KMLB volume through the page's own code and reports what the hybrid would use.
+# Actions tab -> "KMLB validate" -> Run workflow. Blank time = the Crew-11 scrub volume.
+on:
+  workflow_dispatch:
+    inputs:
+      at:
+        description: "UTC time, e.g. 2025-07-31T16:05 (blank = Crew-11 scrub)"
+        required: false
+        default: ""
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install eccodes (pygrib needs the C library)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libeccodes0 libeccodes-dev
+      - run: pip install -r requirements.txt
+      - name: Validate
+        env:
+          AT: ${{ inputs.at }}
+        run: if [ -n "$AT" ]; then python kmlb_validate.py "$AT"; else python kmlb_validate.py; fi
