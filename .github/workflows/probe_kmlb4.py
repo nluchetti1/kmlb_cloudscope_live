@@ -10,11 +10,15 @@ Probe 4: the unvalidated pieces of the hybrid KMLB page, on real volumes from 20
   N. CSU hydrometeor ID (summer, S band) with a standard temperature profile: time, class counts,
      graupel gates. Plus a ZDR-column count (ZDR >= 1 dB and Z >= 20 dBZ above the 0 C level).
 
+    python probe_kmlb4.py                          # the 20 Oct 2026 volumes (default)
+    python probe_kmlb4.py --at 2025-07-31T16:05     # the volume nearest a time (e.g. Crew-11 scrub)
+
 Needs probe_kmlb.py beside it. pip install arm_pyart csu_radartools requests
 Writes probe_kmlb4_report.txt.
 """
 import datetime as dt
 import os
+import sys
 import tempfile
 import time
 
@@ -26,6 +30,7 @@ BUCKET = "unidata-nexrad-level2"
 DAY = "2026/10/20/KMLB/"
 OUT = []
 FREEZE_KM = 4.6          # standard Florida autumn 0 C height for the test only
+LC39A = (28.6084, -80.6043)
 
 
 def say(s=""):
@@ -60,7 +65,7 @@ def section_k(keys):
     if lags:
         v = sorted(x[1] for x in lags)
         say(f"   {len(v)} volumes: lag median {v[len(v) // 2]:.1f} min, p90 {v[int(0.9 * len(v))]:.1f}, max {v[-1]:.1f}")
-        full = [x[1] for x in lags if P.vol_time(x[2]).hour in (10, 11)]
+        full = [x[1] for x in lags if P.vol_time(x[2]).hour in (10, 11)] if "--at" not in sys.argv else []
         if full:
             say(f"   10-11Z (full volumes): median {sorted(full)[len(full) // 2]:.1f} min")
 
@@ -69,7 +74,7 @@ def section_l(full_key, short_key):
     say("\n" + "=" * 78 + "\nL. Read and grid: full vs truncated volume\n" + "=" * 78)
     import pyart
     out = {}
-    for label, key in (("full 19.5 deg", full_key), ("VCP 35 6.4 deg", short_key)):
+    for label, key in (("full 19.5 deg", full_key), ("VCP 35 6.4 deg", short_key)):  # labels are keys; --at uses the same two slots
         radar, rt = read(key)
         el = sorted({round(float(a), 1) for a in radar.fixed_angle["data"]})
         say(f"   {label}: {os.path.basename(key)}, {radar.nsweeps} sweeps, top {max(el)} deg, read {rt:.1f} s")
@@ -125,6 +130,8 @@ def section_n(radar):
     kdp = (np.ma.filled(radar.fields["kdp"]["data"], np.nan) if "kdp" in radar.fields
            else np.zeros_like(dz))
     col = (zdr >= 1.0) & (dz >= 20.0) & (zkm > FREEZE_KM) & (rho >= 0.8)
+    if "--at" in sys.argv:
+        say(f"   (0 C height assumed {FREEZE_KM} km; summer is nearer 4.8-5.0 km, so this slightly overcounts)")
     say(f"   ZDR-column gates (ZDR >= 1 dB, Z >= 20 dBZ, above {FREEZE_KM} km, RHOHV >= 0.8): {int(col.sum())}")
     try:
         from csu_radartools import csu_fhc
@@ -134,17 +141,37 @@ def section_n(radar):
         names = ["unclassified", "drizzle", "rain", "ice crystals", "aggregates", "wet snow",
                  "vertical ice", "low-density graupel", "high-density graupel", "hail", "big drops"]
         valid = np.isfinite(dz) & (dz > 0)
-        counts = {names[c] if c < len(names) else c: int(((hid == c) & valid).sum()) for c in range(11)}
+        wx = valid & (dz >= 5) & (rho >= 0.8)       # weather-only: drops insects, clutter, clear air
         say(f"   csu_fhc_summer: {ht:.1f} s for the volume")
-        say(f"   class counts where Z > 0 dBZ: {counts}")
-        g = ((hid == 7) | (hid == 8)) & valid & (T <= 0) & (T >= -20)
-        say(f"   graupel gates in the 0 to -20 C layer: {int(g.sum())}")
+        for label, m in (("Z > 0 dBZ (all echo)", valid), ("weather only (Z >= 5, RHOHV >= 0.8)", wx)):
+            counts = {names[c]: int(((hid == c) & m).sum()) for c in range(11) if ((hid == c) & m).any()}
+            say(f"   class counts, {label}: {counts}")
+        g = ((hid == 7) | (hid == 8)) & wx & (T <= 0) & (T >= -20)
+        say(f"   graupel gates in the 0 to -20 C layer (weather only): {int(g.sum())}")
+        lat, lon = radar.gate_latitude["data"], radar.gate_longitude["data"]
+        near = np.hypot((lat - LC39A[0]) * 60, (lon - LC39A[1]) * 60 * np.cos(np.radians(LC39A[0]))) <= 10
+        gn = g & near
+        if gn.any():
+            say(f"   graupel within 10 nmi of LC-39A: {int(gn.sum())} gates, heights "
+                f"{float(zkm[gn].min()):.1f}-{float(zkm[gn].max()):.1f} km, max Z {float(dz[gn].max()):.0f} dBZ")
+        else:
+            say("   graupel within 10 nmi of LC-39A: none")
+        cn = col & near
+        say(f"   ZDR-column gates within 10 nmi of LC-39A: {int(cn.sum())}")
     except Exception as e:
         say(f"   CSU HID: {type(e).__name__}: {str(e)[:160]}")
 
 
+def pick(vols, at):
+    """Volume starting nearest `at`."""
+    return min(vols, key=lambda v: abs((v[2] - at).total_seconds()))[0] if vols else None
+
+
 if __name__ == "__main__":
     say(f"KMLB probe 4 {P.now():%Y-%m-%d %H:%MZ}")
+    at = dt.datetime.fromisoformat(sys.argv[sys.argv.index("--at") + 1]) if "--at" in sys.argv else None
+    if at:
+        DAY = at.strftime("%Y/%m/%d/KMLB/")
     try:
         keys = P.s3_list(BUCKET, DAY)
     except Exception as e:
@@ -152,8 +179,12 @@ if __name__ == "__main__":
         open("probe_kmlb4_report.txt", "w").write("\n".join(OUT) + "\n")
         raise SystemExit(1)
     vols = P.volumes(keys)
-    full = next((k for k, _, t in vols if t.hour == 10 and t.minute >= 2), None)
-    short = next((k for k, _, t in vols if t.hour == 12), None)
+    if at:
+        full = pick(vols, at)
+        short = pick(vols, at - dt.timedelta(minutes=30))     # a second volume for comparison
+    else:
+        full = next((k for k, _, t in vols if t.hour == 10 and t.minute >= 2), None)
+        short = next((k for k, _, t in vols if t.hour == 12), None)
     say(f"   full volume: {full}\n   truncated volume: {short}")
     radars = {}
     for name, fn in (("K", lambda: section_k(keys)), ("L", lambda: radars.update(section_l(full, short))),
