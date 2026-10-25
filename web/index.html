@@ -315,7 +315,7 @@
 
 <script>
 // Bump on every viewer change. The header shows it, so a stale page is visible at a glance.
-const VIEWER_VERSION = "kmlb-v1";
+const VIEWER_VERSION = "kmlb-v2";
 // The companion MRMS page; set it to show a link in the header (blank hides it).
 const MRMS_PAGE_URL = "";
 const STALE_WARN_MIN = 12, STALE_BAD_MIN = 20, REFRESH_S = 60;
@@ -610,9 +610,10 @@ function radarRow(d, n, c, f){
   if (k.mode === "none") return `<dt>Radar</dt><dd style="color:var(--dim)">MRMS only: ${k.note || "no KMLB volume"}</dd>`;
   if (v === 255) return `<dt>Radar</dt><dd>MRMS only - KMLB does not sample this column</dd>`;
   const top = v / 10;
-  return top >= 15
-    ? `<dt>Radar</dt><dd>KMLB through the column (to ${top.toFixed(1)} km)</dd>`
-    : `<dt>Radar</dt><dd>KMLB up to ${top.toFixed(1)} km here, MRMS above</dd>`;
+  if (top >= 15) return `<dt>Radar</dt><dd>KMLB through the column (to ${top.toFixed(1)} km)</dd>`;
+  return k.column_mode === "mixed"
+    ? `<dt>Radar</dt><dd>KMLB up to ${top.toFixed(1)} km here, MRMS above</dd>`
+    : `<dt>Radar</dt><dd>MRMS here - KMLB samples this column only to ${top.toFixed(1)} km</dd>`;
 }
 // Surface electric field (plane 13): the strongest 15-minute |E| among reporting mills within 5 nmi.
 function fmCoverNote(f){
@@ -1212,10 +1213,10 @@ function drawMethod(){
     `it drops, so any echo at the 0 °C level beneath an anvil counts as the anvil reaching 0 °C, ` +
     `and the exception for an anvil entirely colder than 0 °C is rarely granted.</p>` +
     `<p><b>Radar.</b> Each frame uses the KMLB Level II volume whose scan midpoint is nearest the ` +
-    `frame time. Wherever KMLB's beams sample a height, that height comes from KMLB; above its highest ` +
-    `beam, and in the cone of silence over the radar, it comes from MRMS. With AVSET on, KMLB often ` +
-    `stops at 6.4°, about 6.8 km over the pads, so the colder rules then rest on MRMS; with AVSET off ` +
-    `(launch countdowns) KMLB covers the full depth. Low-level gates with RHOHV below 0.8 and under ` +
+    `frame time. A map column comes wholly from KMLB where KMLB samples it from 3 km or lower up to ` +
+    `15 km, and wholly from MRMS everywhere else - never a mix, which made the classifier invent ` +
+    `cumulus from two radars' halves of a column. With AVSET on, KMLB often stops at 6.4°, about ` +
+    `6.8 km over the pads, so the pads then use MRMS; with AVSET off (launch countdowns) they use KMLB. Low-level gates with RHOHV below 0.8 and under ` +
     `35 dBZ are treated as clutter; nothing is removed above 3 km.</p>` +
     `<p>Page ${VIEWER_VERSION}. Built ${hhmm(M.generated)}.</p>`;
 }
@@ -1241,7 +1242,8 @@ function kmlbText(f){
   const when = `KMLB ${k.mid ? k.mid.slice(0, 5) + "Z" : ""}, VCP ${k.vcp}, to ${k.top_deg}°`;
   return k.mode === "full"
     ? `<span>Radar: <b>${when}</b>, full depth over the pads</span>`
-    : `<span>Radar: ${when} <span class="warn">— sampled to ${k.lc39a_top_km} km over LC-39A, MRMS above</span></span>`;
+    : `<span>Radar: ${when} <span class="warn">— sampled to only ${k.lc39a_top_km} km over LC-39A, ` +
+      (k.column_mode === "mixed" ? "MRMS above" : "so the pads use MRMS") + `</span></span>`;
 }
 // Which feeds this frame was scored with - a missing feed must be visible, not silent.
 function srcLine(f){
