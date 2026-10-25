@@ -105,10 +105,25 @@ check(F["vii"][j, i] >= K.VII_FLOOR and F["vii"][j, i] != 2.0, f"full: VII from 
 check(F["super"][j, i] > K.NO_ECHO, f"full: 33-60 kft layer from KMLB {F['super'][j,i]:.1f} dBZ")
 check(F["hmax"][j, i] <= 1000.0, f"full: height of max {F['hmax'][j,i]:.0f} m (lowest level - the analytic storm peaks at the ground)")
 F = mrms_F(); frt.apply_fields(F)
-check(F["r20"][j, i] == 20.0, f"truncated: r20 from MRMS {F['r20'][j,i]:.1f}")
-check(abs(F["r0"][j, i] - (50 - 2.5*r0_ - 2*4.8)) < 2.5, f"truncated: r0 from KMLB {F['r0'][j,i]:.1f}")
-check(abs(F["comp"][j, i] - max(49.0, 45.0)) < 2.5, f"truncated: comp is the larger of KMLB and MRMS {F['comp'][j,i]:.1f}")
-check(F["vii"][j, i] == 2.0, "truncated: VII from MRMS (KMLB cannot see -10 to -40 C here)")
-check(F["super"][j, i] == 15.0, "truncated: 33-60 kft layer from MRMS")
-check(F["r0"][jc, ic] == -99.0 or not np.isfinite(F["r0"][jc, ic]) or F["r0"][jc, ic] <= -99, "clutter column: no echo at 0 C")
+check(K.COLUMN_MODE == "single", "default column mode: single")
+check(F["r0"][j, i] == 30.0 and F["comp"][j, i] == 45.0 and F["r20"][j, i] == 20.0 and F["vii"][j, i] == 2.0,
+      f"truncated, single: the whole column stays MRMS (r0 {F['r0'][j,i]}, comp {F['comp'][j,i]}, r20 {F['r20'][j,i]})")
+check(frt.info["column_mode"] == "single" and frt.info["kmlb_columns"] < fr.info["kmlb_columns"],
+      f"KMLB columns: truncated {frt.info['kmlb_columns']} of the map, full {fr.info['kmlb_columns']}")
+
+print("== the probe's artifact: KMLB slices empty, MRMS echo aloft (anvil), truncated column")
+F = mrms_F()
+for k in ("r0", "r5", "r10", "r15", "r20"):
+    F[k] = np.where(F[k] > -99, -99.0, F[k]).astype(np.float32)     # MRMS: no slice echo...
+F["comp"][j, i], F["hmax"][j, i] = 4.0, 6500.0                      # ...but echo peaking at 6.5 km
+Fs = {k: v.copy() for k, v in F.items()}; frt.apply_fields(Fs)
+check(Fs["hmax"][j, i] == 6500.0 and Fs["comp"][j, i] == 4.0 and all(Fs[k][j, i] == -99.0 for k in ("r0", "r10")),
+      "single: column untouched - MRMS's own consistent view, no KMLB slices spliced in")
+
+print("== mixed mode (kmlb-v1) still available")
+K.COLUMN_MODE = "mixed"
+F = mrms_F(); frt.apply_fields(F)
+check(F["r20"][j, i] == 20.0 and abs(F["r0"][j, i] - (50 - 2.5*r0_ - 2*4.8)) < 2.5 and abs(F["comp"][j, i] - 46.6) < 2.5,
+      f"mixed: r0 from KMLB {F['r0'][j,i]:.1f}, r20 from MRMS, comp the larger {F['comp'][j,i]:.1f}")
+K.COLUMN_MODE = "single"
 print(f"\n{len(FAILS)} failure(s)"); sys.exit(1 if FAILS else 0)

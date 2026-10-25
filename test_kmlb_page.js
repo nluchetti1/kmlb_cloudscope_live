@@ -27,14 +27,14 @@ const run = c => vm.runInContext(c, ctx);
 setTimeout(async () => {
   let bad = 0; const ok = (c, m) => { console.log((c ? "  ok    " : "  FAIL  ") + m); if (!c) bad++; };
   ok(run("M && M.frames.length") > 0, "manifest loaded");
-  ok(/Page kmlb-v1/.test(els.method.innerHTML) && /Radar\./.test(els.method.innerHTML), "footer: kmlb-v1 and the radar method note");
+  ok(/Page kmlb-v2/.test(els.method.innerHTML) && /Radar\./.test(els.method.innerHTML), "footer: kmlb-v2 and the radar method note");
   const sl = strip(els.srcline.innerHTML);
-  ok(/^Radar: KMLB \d\d:\d\dZ, VCP 215, to 6\.4° — sampled to 6\.8 km over LC-39A, MRMS above/.test(sl), "source line: " + sl.split("Scored")[0]);
+  ok(/^Radar: KMLB \d\d:\d\dZ, VCP 215, to 6\.4° — sampled to only 6\.8 km over LC-39A, so the pads use MRMS/.test(sl), "source line: " + sl.split("Scored")[0]);
   const S = run("M.sites");
   run(`readout(${S["LC-39A"][0]}, ${S["LC-39A"][1]}, "LC-39A")`); await new Promise(r => setTimeout(r, 40));
-  ok(/Radar KMLB up to 6\.8 km here, MRMS above/.test(strip(els.readout.innerHTML)), "LC-39A readout: KMLB up to 6.8 km, MRMS above");
+  ok(/Radar MRMS here - KMLB samples this column only to 6\.8 km/.test(strip(els.readout.innerHTML)), "LC-39A readout: MRMS here, KMLB only to 6.8 km");
   run(`readout(28.15, -80.65, null)`); await new Promise(r => setTimeout(r, 40));
-  ok(/Radar MRMS only - KMLB does not sample this column|Radar KMLB up to/.test(strip(els.readout.innerHTML)), "over the radar: " + (strip(els.readout.innerHTML).match(/Radar [^A-Z]*[A-Za-z ,.0-9-]*/) || [""])[0]);
+  ok(/Radar MRMS only - KMLB does not sample this column|Radar MRMS here - KMLB samples/.test(strip(els.readout.innerHTML)), "over the radar: " + (strip(els.readout.innerHTML).match(/Radar [^A-Z]*[A-Za-z ,.0-9-]*/) || [""])[0]);
   run(`readout(29.55, -81.55, null)`); await new Promise(r => setTimeout(r, 40));
   ok(/Radar KMLB through the column/.test(strip(els.readout.innerHTML)), "190 km out, the 6.4° beam is above 15 km: 'through the column'");
   run(`frameAt(idx).kmlb = Object.assign({}, frameAt(idx).kmlb, {mode: "full", top_deg: 19.5, vcp: 212, lc39a_top_km: 20.2}); srcLine(frameAt(idx))`);
@@ -45,7 +45,7 @@ setTimeout(async () => {
   ok(/Radar MRMS only: no KMLB volume within 6 min/.test(strip(els.readout.innerHTML)), "readout says MRMS only, with the reason");
   run(`DATA["old.bin"] = DATA[frameAt(idx).data].slice(0, 14 * M.grid.ny * M.grid.nx); frameAt(idx).data = "old.bin"; delete frameAt(idx).kmlb; show(idx); readout(${S["LC-39A"][0]}, ${S["LC-39A"][1]}, "LC-39A")`);
   await new Promise(r => setTimeout(r, 40));
-  ok(!/Radar /.test(strip(els.readout.innerHTML).replace(/Radar source/,"")) || !/KMLB up to/.test(els.readout.innerHTML), "frame without plane 14 / kmlb info: no radar row, no crash");
+  ok(!/KMLB samples this column|KMLB through the column/.test(els.readout.innerHTML), "frame without plane 14 / kmlb info: no radar row, no crash");
   ok(!/Radar:/.test(els.srcline.innerHTML), "and no radar item in the source line");
   console.log(`\n${bad} failure(s)`); process.exit(bad ? 1 : 0);
 }, 300);

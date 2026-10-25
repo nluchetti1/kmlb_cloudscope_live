@@ -58,6 +58,7 @@ NOT EVALUATED
 
 import datetime
 import gzip
+import zlib
 import json
 import logging
 import os
@@ -354,10 +355,26 @@ def _session():
     return s
 
 
+FETCH_TRIES = 3
+
+
 def fetch_url(sess, url):
-    r = sess.get(url, timeout=90)
-    r.raise_for_status()
-    return gzip.decompress(r.content)
+    """Download and gunzip one MRMS file. A transfer cut off mid-body, a timeout, a dropped
+    connection or a truncated gzip is retried (2 s, then 4 s): the adapter's retries only cover
+    connection setup, and on 24 Oct 2026 one cut-off Reflectivity_-10C (899,639 of 903,459 bytes)
+    withheld a whole frame. HTTP errors (404 etc.) are not retried."""
+    for attempt in range(FETCH_TRIES):
+        try:
+            r = sess.get(url, timeout=90)
+            r.raise_for_status()
+            return gzip.decompress(r.content)
+        except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout, EOFError, gzip.BadGzipFile, zlib.error) as e:
+            if attempt == FETCH_TRIES - 1:
+                raise
+            logging.info(f"{url.rsplit('/', 1)[-1]}: {type(e).__name__}; retry "
+                         f"{attempt + 1} of {FETCH_TRIES - 1}")
+            time.sleep(2 * (attempt + 1))
 
 
 def latest_url(product):

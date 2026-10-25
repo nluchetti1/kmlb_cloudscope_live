@@ -15,7 +15,17 @@ WHY A HYBRID
     Crew-11 scrub: full volumes to 19.5 deg from 13:01 to 16:09Z). So the depth KMLB covers changes
     volume to volume, and the page says, for every frame, how far up KMLB reached.
 
-WHAT COMES FROM WHERE
+SINGLE-SOURCE COLUMNS (COLUMN_MODE = "single", since kmlb-v2)
+    A map column is ALL KMLB where KMLB samples it from 3 km or lower up to FULL_KM (15 km) or
+    higher, and ALL MRMS everywhere else - slices, composite, hmax, the upper layer, VII, the Steiner
+    level and the 3-D volume alike. The per-field merge below ("mixed") let one column mix radars:
+    KMLB's empty slices with MRMS's composite and hmax made the classifier's gap rule see "echo, no
+    slice hits, peak above -10 C" and call cumulus colder than -10 C that neither radar showed - 6
+    of the 10 extra violations a case probe could reproduce (Oct 2026), concentrated 50-65 km from
+    KMLB where the 6.4 deg beam reaches -10 C but not -20 C: right over the pads. With AVSET on, pad
+    columns are therefore MRMS; with AVSET off (launch countdowns) they are KMLB.
+
+WHAT COMES FROM WHERE (COLUMN_MODE = "mixed", the kmlb-v1 behaviour)
     r0 ... r20      KMLB at the XMR (BUFKIT) isotherm heights where its beams reach them, else MRMS
     comp, hmax      KMLB where it samples the column to 15 km; elsewhere the larger of KMLB and MRMS
     super           MRMS 33-60 kft layer composite (definition believed, not verified) unless KMLB
@@ -55,7 +65,9 @@ import requests
 
 import mrms_classify as M
 
-KMLB_VERSION = "kmlb-v1"
+KMLB_VERSION = "kmlb-v2"
+COLUMN_MODE = "single"                # "single": whole columns from one radar; "mixed": kmlb-v1
+COLUMN_BOTTOM_M = 3000.0              # a KMLB column must be sampled from here (and to FULL_KM)
 SITE = "KMLB"
 RADAR = (28.1133, -80.6542)           # overridden by the volume's own latitude/longitude/altitude
 BUCKET = "https://unidata-nexrad-level2.s3.amazonaws.com"
@@ -295,6 +307,10 @@ class KmlbFrame:
         self.vol, self.la, self.lo = vol, la, lo
         self.Z, self.H, self.W, self.qc = sample_sweeps(vol, la, lo)
         self.top = top_edge(self.Z, self.H, self.W)
+        self.bottom = np.where(np.isfinite(self.Z), self.H - self.W, np.inf).min(axis=0)
+        # Columns that come wholly from KMLB (single mode); in mixed mode every sampled height does.
+        self.kcol = ((np.nan_to_num(self.top, nan=-1.0) >= FULL_KM * 1000.0)
+                     & (self.bottom <= COLUMN_BOTTOM_M))
         self.levels_m = np.array(STD_LEVELS_KM) * 1000.0
         self.Kstd = np.stack([at_heights(self.Z, self.H, self.W, h) for h in self.levels_m])
         self.iso_m = self._isotherms(iso, z0)
@@ -308,6 +324,8 @@ class KmlbFrame:
             "top_deg": vol["top_deg"], "lc39a_top_km": round(top39, 1) if top39 else None,
             "mid": vol["mid"].strftime("%H:%M:%SZ"),
             "offset_min": round((vol["mid"] - vt).total_seconds() / 60.0, 1),
+            "column_mode": COLUMN_MODE,
+            "kmlb_columns": round(float(self.kcol.mean()), 3),
             "qc": (f"below {QC_MAX_KM:g} km: RHOHV < {QC_RHO} under {QC_KEEP_DBZ:g} dBZ, or no RHOHV "
                    f"under {QC_NORHO_DBZ:g} dBZ; everywhere: patches < {SPECKLE_GATES} gates under "
                    f"{SPECKLE_KEEP_DBZ:g} dBZ"),
@@ -328,6 +346,8 @@ class KmlbFrame:
         return out
 
     def apply_fields(self, F):
+        if COLUMN_MODE == "single":
+            return self._apply_single(F)
         sampled = lambda A: np.isfinite(A)
         for key, tc in ISO_KEYS.items():
             K = at_heights(self.Z, self.H, self.W, self.iso_m[tc])
@@ -358,16 +378,44 @@ class KmlbFrame:
         self.used.update({"comp_full": float(full.mean()), "vii": float(covers.mean())})
         self.info["kmlb_share"] = {k: round(v, 3) for k, v in self.used.items()}
 
+    def _apply_single(self, F):
+        """Every rule input from one radar per column: KMLB in self.kcol, MRMS (untouched) elsewhere."""
+        kc = self.kcol
+        for key, tc in ISO_KEYS.items():
+            K = at_heights(self.Z, self.H, self.W, self.iso_m[tc])
+            F[key] = np.where(kc & np.isfinite(K), K, F[key]).astype(np.float32)
+        Ks = self.Kstd
+        fin = np.isfinite(Ks)
+        kmax = np.where(fin.any(axis=0), np.where(fin, Ks, -np.inf).max(axis=0), NO_ECHO)
+        kmax = np.where(np.isfinite(kmax), kmax, NO_ECHO)
+        kh = np.where(kmax > NO_ECHO, self.levels_m[np.argmax(np.where(fin, Ks, -np.inf), axis=0)], -1.0)
+        lay = (self.levels_m >= LAYER_SUPER_M[0]) & (self.levels_m <= LAYER_SUPER_M[1])
+        L = np.where(np.isfinite(Ks[lay]), Ks[lay], -np.inf).max(axis=0)
+        L = np.where(np.isfinite(L), L, NO_ECHO)
+        kv = vii_from(self.levels_m, Ks, self.iso_m[-10.0], self.iso_m[-40.0])
+        kv = np.where(kv >= VII_FLOOR, kv, 0.0)
+        F["comp"] = np.where(kc, kmax, F["comp"]).astype(np.float32)
+        F["hmax"] = np.where(kc, kh, F["hmax"]).astype(np.float32)
+        F["super"] = np.where(kc, L, F["super"]).astype(np.float32)
+        F["vii"] = np.where(kc, kv, F["vii"]).astype(np.float32)
+        share = float(kc.mean())
+        self.used = {k: share for k in list(ISO_KEYS) + ["comp_full", "vii"]}
+        self.info["kmlb_share"] = {k: round(v, 3) for k, v in self.used.items()}
+
+    def _use(self, K):
+        """Where a KMLB value replaces MRMS's: KMLB columns (single) or any sampled height (mixed)."""
+        return (self.kcol & np.isfinite(K)) if COLUMN_MODE == "single" else np.isfinite(K)
+
     def merge_volume(self, vol, heights_km):
         out = vol.copy()
         for i, h in enumerate(heights_km):
             K = at_heights(self.Z, self.H, self.W, float(h) * 1000.0)
-            out[i] = np.where(np.isfinite(K), K, out[i])
+            out[i] = np.where(self._use(K), K, out[i])
         return out
 
     def merge_level(self, lvl, h_km):
         K = at_heights(self.Z, self.H, self.W, float(h_km) * 1000.0)
-        return np.where(np.isfinite(K), K, lvl).astype(np.float32)
+        return np.where(self._use(K), K, lvl).astype(np.float32)
 
     def extra_planes(self, shape):
         """Plane 14: highest height KMLB samples here, units of 100 m; 255 = not sampled."""
