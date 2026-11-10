@@ -1216,7 +1216,11 @@ function drawMethod(){
     `frame time. A map column comes wholly from KMLB where KMLB samples it from 3 km or lower up to ` +
     `15 km, and wholly from MRMS everywhere else - never a mix, which made the classifier invent ` +
     `cumulus from two radars' halves of a column. With AVSET on, KMLB often stops at 6.4°, about ` +
-    `6.8 km over the pads, so the pads then use MRMS; with AVSET off (launch countdowns) they use KMLB. Low-level gates with RHOHV below 0.8 and under ` +
+    `6.8 km over the pads, so the pads then use MRMS; with AVSET off (launch countdowns) they use KMLB. ` +
+    `Physically connected cumulus are evaluated as one cloud (NASA-STD-4010B LLCCR 35): if any part of a ` +
+    `connected cumulus mass reaches -20 °C, -10 °C or a top colder than +5 °C, the whole mass does, and the ` +
+    `standoffs are measured to its nearest edge (connected = touching echo of 0 dBZ or more; anvil and layered ` +
+    `echo never connect cumulus). Low-level gates with RHOHV below 0.8 and under ` +
     `35 dBZ are treated as clutter; nothing is removed above 3 km.</p>` +
     `<p>Page ${VIEWER_VERSION}. Built ${hhmm(M.generated)}.</p>`;
 }
