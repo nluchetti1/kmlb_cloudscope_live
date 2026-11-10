@@ -1692,6 +1692,52 @@ def attached_history(frames, valid_iso, la, lo, wind=None):
     return union if seen else None
 
 
+# LLCCR 35 (NASA-STD-4010B section 4.3): physically connected clouds - non-transparent parts
+# touching - are evaluated together, most conservatively, over their combined volume. For radar:
+# connected CUMULUS echo (0 dBZ or more; anvil, layered and elevated echo are not cumulus, so per
+# 4.3a/4.3c they never chain cumulus together) is one cloud: if any part of it reaches -20 C, -10 C
+# or a top colder than +5 C, the whole connected mass does, and the standoffs are measured to its
+# nearest edge. Radar sees precipitation only, so cloud joined only by non-precipitating cloud is
+# not connected here. Off by default: switching it changes the verdicts, so it is set explicitly
+# where it is being evaluated.
+CONNECT_CUMULUS = True      # on: adopted Nov 2026 (case statistics, cumulus CSI 0.47 -> 0.50)
+# LLCCR 35 4.3b, separately: a detached anvil physically connected to cumulus colder than -10 C is
+# assessed as an attached anvil. "Physically connected" is three-dimensional: the anvil must sit
+# next to that cumulus on the map AND reach down to its top - its echo base within
+# ANVIL_CONTACT_M of the cumulus's echo top. The first version tested the map only, so an anvil
+# floating kilometres above a cumulus counted as touching it: detached-anvil POD halved (0.62 ->
+# 0.31) with no gain for attached anvil (case statistics, Nov 2026). "Or had at any time" uses the
+# current frame only.
+CONNECT_ANVIL_43B = False
+ANVIL_CONTACT_M = 1000.0
+
+
+def _anvil_contact(detached, cu10, e, z_of, hmax, sup, top_m):
+    """Detached-anvil columns in 3-D contact with cumulus colder than -10 C (LLCCR 35 4.3b)."""
+    ctop = np.full(detached.shape, -np.inf)             # cumulus echo top, m
+    for k, tc in (("r20", -20.0), ("r15", -15.0), ("r10", -10.0), ("r5", -5.0), ("r0", 0.0)):
+        ctop = np.where(np.isneginf(ctop) & e[k], z_of(tc), ctop)
+    ctop = np.maximum(ctop, np.where(cu10, hmax, -np.inf))
+    if top_m is not None:
+        ctop = np.where(np.isfinite(top_m), np.maximum(ctop, top_m), ctop)
+    ctop = np.where(cu10, ctop, -np.inf)
+    abase = np.full(detached.shape, np.inf)              # anvil echo base, m
+    for k, tc in (("r0", 0.0), ("r5", -5.0), ("r10", -10.0), ("r15", -15.0), ("r20", -20.0)):
+        abase = np.where(np.isposinf(abase) & e[k], z_of(tc), abase)
+    abase = np.where(np.isposinf(abase) & (sup >= 0.0), 10058.0, abase)
+    reach = maximum_filter(ctop, size=3)                 # the tallest cumulus top next to each column
+    return detached & (abase <= reach + ANVIL_CONTACT_M)
+
+
+def _spread_objects(lab, m):
+    """m, plus every column of each labeled object that contains any column of m (LLCCR 35).
+    Only ever adds: a flagged column outside every object stays flagged (MRMS's isotherm products and
+    composite are separate, so a column can show echo at -20 C while the composite is below 0 dBZ -
+    dropping it lost two real violations, Starlink 6-22 and GOES-U, Nov 2026)."""
+    ids = np.unique(lab[m & (lab > 0)])
+    return ((np.isin(lab, ids) & (lab > 0)) | m) if ids.size else m
+
+
 def evaluate(F, z0, la, lo, history=None, iso=None, sep=None, ltg_nm=None, sat=None, fm=None):
     """Traffic light, per-rule grids, cloud class and echo-top level for every cell.
 
@@ -1851,6 +1897,20 @@ def evaluate(F, z0, la, lo, history=None, iso=None, sep=None, ltg_nm=None, sat=N
     cu10 = (e["r10"] | gap_m10 | sat_m10) & ~not_cu
     cu20 = (e["r20"] | sat_m20) & ~not_cu
     sat_up = (sat_m10 & ~(e["r10"] | gap_m10)) | (sat_m20 & ~e["r20"])
+    cuthru = cu_echo & top_to_plus5
+    if CONNECT_CUMULUS and cu_echo.any():
+        lab_cu, n_cu = label(cu_echo, structure=np.ones((3, 3)))
+        cu20 = _spread_objects(lab_cu, cu20)
+        cu10 = _spread_objects(lab_cu, cu10 | cu20)
+        cuthru = _spread_objects(lab_cu, cuthru | cu10)
+    if CONNECT_ANVIL_43B and detached.any() and cu10.any():   # 4.3b, with 3-D contact
+        touch = _anvil_contact(detached, cu10, e, z_of, hmax, F["super"],
+                               sep.get("top_m") if sep is not None else None)
+        if touch.any():
+            lab_d, n_d = label(detached, structure=np.ones((3, 3)))
+            became = _spread_objects(lab_d, touch)       # the whole anvil, wherever one part touches
+            attached = attached | became
+            detached = detached & ~became
     # Thick cloud layer: echo spanning at least ~4,500 ft inside the 0 to -20 C band. Adjacent
     # isotherm slices 10 C apart are ~1.5 km (~5,000 ft) apart, so echo at both ends of any
     # 10-degree span counts. The first version only tested 0 to -10 C, so an elevated layer
@@ -1872,7 +1932,7 @@ def evaluate(F, z0, la, lo, history=None, iso=None, sep=None, ltg_nm=None, sat=N
         lit = lit_within(L["lightning_nm"] + m)
         return {
             "lightning":       lit,
-            "cumulus_through": near(cu_echo & top_to_plus5, m),
+            "cumulus_through": near(cuthru, m),
             "cumulus_5nm":     near(cu10, L["cumulus_5nm"] + m),
             "cumulus_10nm":    near(cu20, L["cumulus_10nm"] + m),
             "attached_anvil":  (near(attached, L["attached_3nm"] + m) & ~exception)
@@ -1932,7 +1992,7 @@ def evaluate(F, z0, la, lo, history=None, iso=None, sep=None, ltg_nm=None, sat=N
     mrr_here = peak(mrr, L["mrr_eval_nm"])
     # The masks each rule is built from, and the MRR - recorded by the climatology as distances so
     # the standoffs and thresholds can be re-applied later without re-scoring the radar.
-    feat = {"cuthru": cu_echo & top_to_plus5, "cu10": cu10, "cu20": cu20, "att": attached,
+    feat = {"cuthru": cuthru, "cu10": cu10, "cu20": cu20, "att": attached,
             "det": detached, "warm": (attached | detached) & warm_cols, "thick": thick,
             "ltg": lightning, "mrr1": mrr1}
     diag = {"feat": feat, "sat_ok": sat_ok, "sat_up": sat_up, "sat": sat,

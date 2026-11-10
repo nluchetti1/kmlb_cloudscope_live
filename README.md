@@ -28,3 +28,10 @@ reached ("full depth over the pads" with AVSET off, or "sampled to 6.8 km over L
 `TOL_MIN` (6 min), `QC_RHO` / `QC_MAX_KM` / `QC_KEEP_DBZ` (0.80, 3 km, 35 dBZ), `FULL_KM` (15 km),
 `VII_FLOOR` (0.5 kg/m2 - approximates MRMS VII; tune on overlapping cases), `LAYER_SUPER_M`
 (33-60 kft - the MRMS layer-composite definition as I understand it; verify).
+
+## Cumulus connectivity (Nov 2026)
+mrms_classify.py evaluates physically connected cumulus as one cloud (NASA-STD-4010B LLCCR 35,
+CONNECT_CUMULUS = True): if any part of a connected cumulus mass reaches -20 C, -10 C or a top colder
+than +5 C, the whole mass does, and standoffs are measured to its nearest edge. Validated against the
+LWO logs in the case replays (cumulus CSI 0.47 -> 0.50, other rules unchanged). The 4.3b anvil
+exception is present but off (CONNECT_ANVIL_43B).
