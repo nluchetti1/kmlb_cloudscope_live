@@ -1520,6 +1520,10 @@ STEINER = {"bg_radius_km": 11.0, "intense_dbz": 40.0, "target_km": 3.0,
 # the background window has no meaningful background, so it is convective. Every error this
 # makes is conservative - a small stratiform patch gets called convective, never the reverse.
 ISOLATED_KM2 = float(np.pi * 11.0 ** 2)      # ~380 km2, the background window's area
+# DECK_FIX_KV01 (see deck_fix.py). An echo column is ROOTED when its 3-D echo base is at or below
+# ROOT_KM, or the radar cannot see under it. Cumulus bases here are ~1 km; a deck's fall
+# streaks end ~2.5-3 km up. Rooted-or-blind is the conservative side of every test that uses it.
+ROOT_KM = 2.0
 
 
 def steiner_level(heights, z0_km):
@@ -1533,7 +1537,7 @@ def steiner_level(heights, z0_km):
     return near[0] if near else 0
 
 
-def steiner_conv_strat(z, dlat_km, dlon_km):
+def steiner_conv_strat(z, dlat_km, dlon_km, comp=None, rooted=None):
     """(convective, stratiform) masks from one constant-height reflectivity field in dBZ.
     Sentinels (-99 no echo, -999 no coverage) are simply not echo."""
     from scipy.ndimage import convolve
@@ -1559,7 +1563,17 @@ def steiner_conv_strat(z, dlat_km, dlon_km):
         area = np.bincount(lab.ravel(), minlength=n + 1) * dlat_km * dlon_km
         small = area <= ISOLATED_KM2
         small[0] = False
-        conv |= small[lab]
+        iso = small[lab]
+        if comp is not None and rooted is not None:
+            # A patch "isolated" at this level but inside a large composite echo mass is the
+            # underside of that mass (a deck's fall streaks), not a lone cell - unless its echo
+            # reaches the ground (rooted) or the radar cannot see. kv01: every false cumulus.
+            labc, nc = label(comp >= 0.0, structure=np.ones((3, 3)))
+            if nc:
+                areac = np.bincount(labc.ravel(), minlength=nc + 1) * dlat_km * dlon_km
+                big = (areac > ISOLATED_KM2)[labc] & (labc > 0)
+                iso &= ~(big & ~rooted)
+        conv |= iso
     return conv, echo & ~conv
 
 
@@ -1576,23 +1590,26 @@ def separation(vol, heights, vbase, z0, iso, la, lo, vtop=None):
     k = steiner_level(list(heights), z0_m / 1000.0)
     lvl = vol[k]
     dlat_km, dlon_km = _spacing(la, lo)
-    conv, strat = steiner_conv_strat(lvl, dlat_km, dlon_km)
-    known = lvl > -900.0
     base_idx = (vbase & 63).astype(int)
     has = vbase != 255
     base_h = np.where(has, np.asarray(heights)[np.clip(base_idx, 0, len(heights) - 1)] * 1000.0,
                       np.inf)
     blind_below = has & ((vbase & 64) > 0)
+    rooted = has & (blind_below | (base_h <= ROOT_KM * 1000.0))
+    comp3d = np.max(np.where(vol > -900.0, vol, -99.0), axis=0)
+    conv, strat = steiner_conv_strat(lvl, dlat_km, dlon_km, comp3d, rooted)
+    known = lvl > -900.0
     top_m = None
     if vtop is not None:
         top_m = np.where(vtop != 255, np.asarray(heights)[np.clip(vtop.astype(int), 0, len(heights) - 1)]
                          * 1000.0, np.nan)
     return {"conv": conv, "strat": strat & known, "known": known, "top_m": top_m,
             "clear_low": known & (lvl < 0.0),
-            "below0": has & ((base_h < z0_m) | blind_below), "level_km": float(heights[k])}
+            "below0": has & ((base_h < z0_m) | blind_below), "level_km": float(heights[k]),
+            "rooted": rooted, "base_m": np.where(has & ~blind_below, base_h, np.nan)}
 
 
-def separation_lite(lvl, height_km, la, lo):
+def separation_lite(lvl, height_km, la, lo, comp=None, root=None):
     """Steiner from ONE level, for frames without a full volume (archive frames, or a volume
     that failed). Measured 7 Oct 2026, MRMS PrecipFlag agreed with Steiner on 96.8% of cells -
     but every disagreement (611 cells) was Steiner convective / PrecipFlag stratiform, never the
@@ -1601,11 +1618,21 @@ def separation_lite(lvl, height_km, la, lo):
     precipitation" code. One 3-D level is ~600 KB and a second to decode, so every frame runs
     the same algorithm instead. Part (a) of the anvil exception still needs echo bases, so it
     falls back to the 0 C slice on these frames."""
+    # DECK_FIX_KV01_LITE: root = the ROOT_KM level (MRMS 2.0 km, KMLB-merged on hybrid frames). With
+    # it and the composite, the isolated-cell, VII-core and elevated fixes work here too; without
+    # it (None), behaviour is as before.
     dlat_km, dlon_km = _spacing(la, lo)
-    conv, strat = steiner_conv_strat(lvl, dlat_km, dlon_km)
+    rooted = base_m = None
+    if root is not None and comp is not None:
+        rooted = (root >= 0.0) | (root <= -900.0)                 # echo at 2 km, or radar blind there
+        with np.errstate(invalid="ignore"):
+            aloft_only = (comp >= 0.0) & (lvl > -900.0) & (lvl < 0.0) & (root > -900.0) & (root < 0.0)
+        base_m = np.where(aloft_only, (float(height_km) + 0.5) * 1000.0, np.nan)   # base above this level
+    conv, strat = steiner_conv_strat(lvl, dlat_km, dlon_km, comp if rooted is not None else None, rooted)
     known = lvl > -900.0
     return {"conv": conv, "strat": strat & known, "known": known, "below0": None,
-            "clear_low": known & (lvl < 0.0), "level_km": float(height_km)}
+            "clear_low": known & (lvl < 0.0), "level_km": float(height_km),
+            "rooted": rooted, "base_m": base_m}
 
 
 def column_base_top(enc):
@@ -1789,7 +1816,11 @@ def evaluate(F, z0, la, lo, history=None, iso=None, sep=None, ltg_nm=None, sat=N
     top_below_0c = any_iso | aloft | gap
     top_to_plus5 = any_iso | (echo & (hmax >= z5))
 
-    core = (comp >= L["core_dbz"]) | (F["vii"] > 0.0)
+    # VII > 0 alone made 24 dBZ cells in an elevated ice deck "cores" (kv01, 10:14 and 12:06), and the
+    # whole deck became attached anvil. VII now counts only in a rooted column (sep["rooted"]:
+    # echo within ROOT_KM of the ground, or blind below); without a volume, as before.
+    vii_ok = sep["rooted"] if (sep is not None and sep.get("rooted") is not None) else True
+    core = (comp >= L["core_dbz"]) | ((F["vii"] > 0.0) & vii_ok)
     # ELEVATED echo: above freezing (it shows at an isotherm level, or sits only aloft) but with
     # nothing at the ~3 km Steiner level where the radar can see. Its base is well above where
     # cumulus bases sit here (~1 km), so it is never cumulus. Found at a shield's thinning edge:
@@ -1797,7 +1828,11 @@ def evaluate(F, z0, la, lo, history=None, iso=None, sep=None, ltg_nm=None, sat=N
     # not judge it (no echo at 3 km), and it fell to the cumulus fallback. Now it joins the anvil
     # candidates - contiguous with an attached anvil it is that anvil's fringe; otherwise it
     # becomes detached anvil or an elevated layer by the same origin test as floating echo.
-    elev = (echo & sep["clear_low"] & (any_iso | aloft)) if sep is not None \
+    base_aloft = np.zeros(comp.shape, bool)
+    if sep is not None and sep.get("base_m") is not None:
+        with np.errstate(invalid="ignore"):
+            base_aloft = sep["base_m"] > sep["level_km"] * 1000.0      # kv01 12:48: based at 4.5 km
+    elev = (echo & sep["clear_low"] & (any_iso | aloft | base_aloft)) if sep is not None \
         else np.zeros(comp.shape, bool)
     anvil = ((e["r20"] | aloft | elev) & ~core) & echo
     lab, n = label(anvil | core, structure=np.ones((3, 3)))
@@ -1818,8 +1853,11 @@ def evaluate(F, z0, la, lo, history=None, iso=None, sep=None, ltg_nm=None, sat=N
     # (the drift-grown history mask). With no history at all - the first runs after deploying
     # - fall back to calling it detached anvil, the conservative choice.
     if history is None:
-        detached = floating
-        elevated = np.zeros(comp.shape, bool)
+        # No history (first frame of a run or replay): detached only if the frame has a convective
+        # core somewhere - an anvil needs a parent. kv01's first frame called a post-frontal deck
+        # with no convection in sight detached anvil end to end.
+        detached = floating if core.any() else np.zeros(comp.shape, bool)
+        elevated = floating & ~detached
     else:
         detached = floating & history
         elevated = floating & ~history
