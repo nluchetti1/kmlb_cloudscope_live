@@ -1359,7 +1359,6 @@ let v3On = false, v3A = null, v3B = null, v3P = null, v3Drag = null, v3Swallow =
 let V3 = null, v3Color = "dbz", v3Key = null, v3Seq = 0;
 const V3_ISO = [0, 10, 20, 30, 40, 50];
 const V3_ON = new Set([0, 20, 40]);
-const V3_ALPHA = {0: 0.3, 10: 0.36, 20: 0.46, 30: 0.6, 40: 0.8, 50: 0.95};
 const V3_MAXCELLS = 110;              // a wider box is sampled every other cell
 const V3_EMPTY = -5;                  // no echo / no coverage: just under the 0 dBZ shell
 const V3_CDN = "cdn.jsdelivr.net";
@@ -1625,18 +1624,29 @@ function v3Build(f, vol, dat){
     return id > 0 ? CLS[id] : [0.55, 0.6, 0.66];
   };
   let tris = 0;
-  const empty = new Set();
+  const empty = new Set(), built = [];
   for (const iso of shown){
     const m = v3March(F, PX, PY, PZ, iso, X, Zs, Yup, byClass ? colOf : null);
     if (!m.idx.length){ empty.add(iso); continue; }
+    built.push([iso, m]);
+  }
+  // Opacity by depth, not by level: the innermost shell that exists is solid and each one further
+  // out fades, so the cores show through everything around them (fixed per-level opacities stacked
+  // three translucent shells in front of the 30-40 dBZ cores and tinted them teal).
+  const nb = built.length;
+  const alphaOf = r => nb === 1 ? 0.6 : 0.1 + 0.9 * Math.pow(r / (nb - 1), 2);
+  for (const [r, [iso, m]] of built.entries()){
     tris += m.idx.length / 3;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(m.pos, 3));
     if (m.col) geo.setAttribute("color", new THREE.Float32BufferAttribute(m.col, 3));
     geo.setIndex(m.idx); geo.computeVertexNormals();
-    const a = byClass ? 0.96 : V3_ALPHA[iso];
-    const mat = new THREE.MeshLambertMaterial({color: byClass ? 0xFFFFFF : (reflColor(iso) || "#04E9E7"),
-      vertexColors: byClass, transparent: a < 0.95, opacity: a, depthWrite: a >= 0.95, side: THREE.DoubleSide});
+    const a = byClass ? 0.96 : alphaOf(r);
+    const col = new THREE.Color(byClass ? 0xFFFFFF : (reflColor(iso) || "#04E9E7"));
+    const mat = new THREE.MeshLambertMaterial({color: col, vertexColors: byClass, transparent: a < 0.95, opacity: a,
+      depthWrite: a >= 0.95, side: THREE.DoubleSide,
+      // cores glow a little, so yellow and orange stay bright on the shaded side too
+      emissive: !byClass && iso >= 30 ? col.clone().multiplyScalar(0.45) : 0x000000});
     const mesh = new THREE.Mesh(geo, mat); mesh.renderOrder = 100 - iso; mesh.userData.shell = iso;
     world.add(mesh);
   }
