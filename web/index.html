@@ -327,6 +327,8 @@
     <label class="chk">Floor <select id="v3-floor"><option value="radar">radar</option><option value="status">status</option>
       <option value="class">cloud class</option><option value="none">none</option></select></label>
     <label class="chk">Height × <input type="range" id="v3-ex" min="1" max="8" step="0.5" value="3"> <b id="v3-exv">3</b></label>
+    <label class="chk" title="dBZ: the outermost shell's opacity (inner shells get more solid). Cloud class: the shell's opacity.">Opacity
+      <input type="range" id="v3-op" min="5" max="100" step="5" value="30"> <b id="v3-opv">30%</b></label>
     <label class="chk"><input type="checkbox" id="v3-smooth" checked> Smooth</label>
     <label class="chk"><input type="checkbox" id="v3-isot" checked> Isotherms</label>
     <button class="v3reset" id="v3-reset">Reset view</button>
@@ -1357,6 +1359,9 @@ $("xs-btn").onclick = () => {
 // (non-uniform) level heights, after an optional 1-2-1 smooth.
 let v3On = false, v3A = null, v3B = null, v3P = null, v3Drag = null, v3Swallow = 0;
 let V3 = null, v3Color = "dbz", v3Key = null, v3Seq = 0;
+// Opacity slider, remembered per colour mode: in dBZ mode it is the outermost shell's opacity (inner
+// shells still grow more solid toward the innermost, so cores show); in class mode, the shell's.
+const V3_OPACITY = {dbz: 0.3, class: 1.0};
 const V3_ISO = [0, 10, 20, 30, 40, 50];
 const V3_ON = new Set([0, 20, 40]);
 const V3_MAXCELLS = 110;              // a wider box is sampled every other cell
@@ -1634,14 +1639,15 @@ function v3Build(f, vol, dat){
   // out fades, so the cores show through everything around them (fixed per-level opacities stacked
   // three translucent shells in front of the 30-40 dBZ cores and tinted them teal).
   const nb = built.length;
-  const alphaOf = r => nb === 1 ? 0.6 : 0.1 + 0.9 * Math.pow(r / (nb - 1), 2);
+  const lo = V3_OPACITY.dbz;
+  const alphaOf = r => nb === 1 ? Math.max(lo, 0.5) : lo + (1 - lo) * Math.pow(r / (nb - 1), 2);
   for (const [r, [iso, m]] of built.entries()){
     tris += m.idx.length / 3;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.Float32BufferAttribute(m.pos, 3));
     if (m.col) geo.setAttribute("color", new THREE.Float32BufferAttribute(m.col, 3));
     geo.setIndex(m.idx); geo.computeVertexNormals();
-    const a = byClass ? 0.96 : alphaOf(r);
+    const a = byClass ? V3_OPACITY.class : alphaOf(r);
     const col = new THREE.Color(byClass ? 0xFFFFFF : (reflColor(iso) || "#04E9E7"));
     const mat = new THREE.MeshLambertMaterial({color: col, vertexColors: byClass, transparent: a < 0.95, opacity: a,
       depthWrite: a >= 0.95, side: THREE.DoubleSide,
@@ -1747,8 +1753,10 @@ $("v3-isos").innerHTML = V3_ISO.map(v =>
   `<label class="chk"><input type="checkbox" data-iso="${v}"${V3_ON.has(v) ? " checked" : ""}> ${v}</label>`).join("") + " <small>dBZ</small>";
 document.querySelectorAll("#v3-isos input").forEach(el => el.onchange = () => {
   const v = +el.dataset.iso; el.checked ? V3_ON.add(v) : V3_ON.delete(v); v3Draw(); });
-$("v3-dbz").onclick = () => { v3Color = "dbz"; press("v3-dbz", "v3-cls"); v3Draw(); };
-$("v3-cls").onclick = () => { v3Color = "class"; press("v3-cls", "v3-dbz"); v3Draw(); };
+function v3OpShow(){ const v = Math.round(V3_OPACITY[v3Color] * 100); $("v3-op").value = v; $("v3-opv").textContent = v + "%"; }
+$("v3-dbz").onclick = () => { v3Color = "dbz"; press("v3-dbz", "v3-cls"); v3OpShow(); v3Draw(); };
+$("v3-cls").onclick = () => { v3Color = "class"; press("v3-cls", "v3-dbz"); v3OpShow(); v3Draw(); };
+$("v3-op").oninput = () => { V3_OPACITY[v3Color] = +$("v3-op").value / 100; $("v3-opv").textContent = $("v3-op").value + "%"; v3Draw(); };
 $("v3-ex").oninput = () => { $("v3-exv").textContent = $("v3-ex").value; v3Draw(); };
 ["v3-floor", "v3-smooth", "v3-isot"].forEach(id => $(id).onchange = () => v3Draw());
 $("v3-reset").onclick = v3ResetCam;
