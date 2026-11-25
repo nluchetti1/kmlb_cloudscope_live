@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Three.js for the 3-D view: resolved through this map, fetched only when that view is opened -->
+<script type="importmap">{"imports": {"three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
 <title>CloudScope Radar · KMLB</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -218,6 +221,22 @@
   footer p{margin:0 0 8px}
   footer b{color:var(--steel); font-weight:600}
   @media (prefers-reduced-motion:reduce){ *{transition:none !important; animation:none !important} }
+  /* ---- 3-D view ---- */
+  .v3{margin-top:10px}
+  .v3bar{display:flex; flex-wrap:wrap; gap:8px 16px; align-items:center; margin:2px 0 8px; font-size:13px}
+  .v3bar .chk{font-size:13px}
+  .v3bar select{background:var(--panel-2); color:var(--ink); border:1px solid var(--line-2); border-radius:4px; padding:2px 6px}
+  .v3bar input[type=range]{width:90px}
+  #v3-isos{display:inline-flex; gap:10px; align-items:center; color:var(--steel)}
+  .v3reset{background:var(--panel-2); color:var(--steel); border:1px solid var(--line-2); border-radius:4px;
+           padding:3px 10px; cursor:pointer}
+  .v3reset:hover{color:var(--ink)}
+  .v3wrap{position:relative; background:var(--well); border-radius:4px; line-height:0; min-height:360px}
+  #v3-canvas{display:block; width:100%; cursor:grab; touch-action:none}
+  #v3-canvas:active{cursor:grabbing}
+  .v3note{color:var(--dim); font-size:12.5px; margin-top:6px}
+  .v3box{fill:rgba(255,255,255,.06); stroke:#FFFFFF; stroke-width:2; vector-effect:non-scaling-stroke; stroke-dasharray:6 4}
+  .v3box.pre{stroke-opacity:.6}
 </style>
 </head>
 <body>
@@ -247,6 +266,7 @@
     <button id="v-over" aria-pressed="false">Overlay on radar</button>
   </div>
   <div class="seg"><button id="xs-btn" aria-pressed="false" title="Tap two points on either map">Cross-section</button></div>
+  <div class="seg"><button id="v3-btn" aria-pressed="false" title="Drag a box on either map">3-D view</button></div>
   <label class="chk"><input type="checkbox" id="rings" checked> Range rings</label>
   <a class="export" id="gif" download hidden>Export GIF</a>
 </div>
@@ -293,6 +313,27 @@
   <div class="xswrap"><canvas id="xs-canvas" height="300"></canvas><canvas id="xs-hover"></canvas>
     <div class="xsmsg" id="xs-msg"></div></div>
   <div class="scale" id="xs-legend"></div>
+</section>
+
+<section class="panel v3" id="v3-panel" hidden>
+  <h3><span>3-D view <small style="font-weight:400">drag to rotate · scroll or pinch to zoom · right-drag or two fingers to pan</small></span>
+    <small id="v3-sub">drag a box on either map</small></h3>
+  <div class="v3bar">
+    <div class="seg" role="group" aria-label="Colour the shells by">
+      <button id="v3-dbz" aria-pressed="true">Colour by dBZ</button>
+      <button id="v3-cls" aria-pressed="false">Colour by cloud class</button>
+    </div>
+    <span id="v3-isos"></span>
+    <label class="chk">Floor <select id="v3-floor"><option value="radar">radar</option><option value="status">status</option>
+      <option value="class">cloud class</option><option value="none">none</option></select></label>
+    <label class="chk">Height × <input type="range" id="v3-ex" min="1" max="8" step="0.5" value="3"> <b id="v3-exv">3</b></label>
+    <label class="chk"><input type="checkbox" id="v3-smooth" checked> Smooth</label>
+    <label class="chk"><input type="checkbox" id="v3-isot" checked> Isotherms</label>
+    <button class="v3reset" id="v3-reset">Reset view</button>
+  </div>
+  <div class="v3wrap" id="v3-wrap"><div class="xsmsg" id="v3-msg"></div></div>
+  <div class="scale" id="v3-legend"></div>
+  <div class="v3note" id="v3-note"></div>
 </section>
 
 </div>
@@ -417,6 +458,7 @@ function show(i){
   srcLine(f);
   if (pin) (pin.mill != null ? millReadout(pin.mill) : readout(pin.lat, pin.lon, pin.label));
   if (xsOn) drawSection();
+  if (v3On) v3Draw();
 }
 
 // ---- geometry: the PNGs are Mercator with the axes filling the figure ------------------
@@ -477,6 +519,7 @@ function drawSvg(svgId, imgId){
             <circle class="xshovr" cx="${hx * W}" cy="${hy * H}" r="${9 * k}"/>
             <circle class="xshov" cx="${hx * W}" cy="${hy * H}" r="${4 * k}"/>`;
   }
+  out += v3Svg(W, H);
   if (pin){
     const [px, py] = toFrac(pin.lat, pin.lon);
     const x = px * W, y = py * H;
@@ -507,6 +550,10 @@ function onTap(ev){
   const fx = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width));
   const fy = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
   const [lat, lon] = fromFrac(fx, fy);
+  if (v3On){
+    if (Date.now() - v3Swallow < 400) return;          // the click that ends a drag, if the browser sends one
+    v3Tap(lat, lon); return;
+  }
   if (xsOn){
     // first tap is A, second is B, a third starts a new line
     if (!xsA || xsB){ xsA = {lat, lon}; xsB = null; xsT = null; }
@@ -1296,9 +1343,412 @@ $("rings").onchange = redraw;
 $("xs-btn").onclick = () => {
   xsOn = !xsOn;
   $("xs-btn").setAttribute("aria-pressed", String(xsOn));
+  if (xsOn && v3On){ v3On = false; $("v3-btn").setAttribute("aria-pressed", "false"); v3A = v3B = v3P = null; v3Draw(); }
   if (!xsOn){ xsA = xsB = null; xsT = null; xsHover = null; }
   redraw(); drawSection();
   if (xsOn) $("xs-panel").scrollIntoView({behavior: "smooth", block: "nearest"});
+};
+
+// ---- 3-D view ---------------------------------------------------------------------------
+// GR2-style volume explorer: drag a box (or tap two corners) on either map; the frame's 3-D
+// volume inside it is drawn as reflectivity iso-surfaces you can rotate. "Colour by cloud class"
+// paints one shell with the classifier's class for each column instead. Three.js is loaded from
+// the CDN only when this view is first opened. Iso-surfaces: marching cubes on the real
+// (non-uniform) level heights, after an optional 1-2-1 smooth.
+let v3On = false, v3A = null, v3B = null, v3P = null, v3Drag = null, v3Swallow = 0;
+let V3 = null, v3Color = "dbz", v3Key = null, v3Seq = 0;
+const V3_ISO = [0, 10, 20, 30, 40, 50];
+const V3_ON = new Set([0, 20, 40]);
+const V3_ALPHA = {0: 0.3, 10: 0.36, 20: 0.46, 30: 0.6, 40: 0.8, 50: 0.95};
+const V3_MAXCELLS = 110;              // a wider box is sampled every other cell
+const V3_EMPTY = -5;                  // no echo / no coverage: just under the 0 dBZ shell
+const V3_CDN = "cdn.jsdelivr.net";
+
+// The box, made square in km, from corner A toward B.
+function v3Square(a, b){
+  const kx = 111.32 * Math.cos(a.lat * Math.PI / 180);
+  const dx = (b.lon - a.lon) * kx, dy = (b.lat - a.lat) * 111.32;
+  const s = Math.max(Math.abs(dx), Math.abs(dy), 8);
+  const lat2 = a.lat + (dy < 0 ? -1 : 1) * s / 111.32, lon2 = a.lon + (dx < 0 ? -1 : 1) * s / kx;
+  return {lat0: Math.min(a.lat, lat2), lat1: Math.max(a.lat, lat2),
+          lon0: Math.min(a.lon, lon2), lon1: Math.max(a.lon, lon2), km: s};
+}
+function v3Svg(W, H){
+  if (!v3On || !v3A) return "";
+  const b = v3B || v3P;
+  if (!b) {
+    const [ax, ay] = toFrac(v3A.lat, v3A.lon);
+    return `<circle class="xsend" cx="${ax * W}" cy="${ay * H}" r="5"/>`;
+  }
+  const q = v3Square(v3A, b);
+  const [x0, y0] = toFrac(q.lat1, q.lon0), [x1, y1] = toFrac(q.lat0, q.lon1);
+  return `<rect class="v3box${v3B ? "" : " pre"}" x="${x0 * W}" y="${y0 * H}" width="${(x1 - x0) * W}" height="${(y1 - y0) * H}"/>`;
+}
+function v3Tap(lat, lon){
+  if (!v3A || v3B){ v3A = {lat, lon}; v3B = null; v3P = null; }
+  else { v3B = {lat, lon}; v3P = null; }
+  redraw(); v3Draw();
+}
+function mapLatLon(ev){
+  const r = ev.currentTarget.getBoundingClientRect();
+  return fromFrac(Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)),
+                  Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height)));
+}
+["map-left", "map-right"].forEach(id => {
+  // the map images are draggable by default; a native image drag cancels the pointer events
+  $(id).addEventListener("dragstart", ev => ev.preventDefault());
+  $(id).addEventListener("pointerdown", ev => {
+    if (!v3On || !M || ev.button !== 0) return;
+    const [lat, lon] = mapLatLon(ev);
+    v3Drag = {x: ev.clientX, y: ev.clientY, lat, lon};
+    try { ev.currentTarget.setPointerCapture(ev.pointerId); } catch (e) {}
+  });
+  $(id).addEventListener("pointercancel", () => { v3Drag = null; });
+  $(id).addEventListener("pointermove", ev => {
+    if (!v3On || !M) return;
+    const [lat, lon] = mapLatLon(ev);
+    if (v3Drag && Math.hypot(ev.clientX - v3Drag.x, ev.clientY - v3Drag.y) > 10){
+      v3A = {lat: v3Drag.lat, lon: v3Drag.lon}; v3B = null; v3P = {lat, lon}; redraw();
+    } else if (v3A && !v3B){ v3P = {lat, lon}; redraw(); }
+  });
+  $(id).addEventListener("pointerup", ev => {
+    if (!v3On || !v3Drag) return;
+    const moved = Math.hypot(ev.clientX - v3Drag.x, ev.clientY - v3Drag.y) > 10;
+    if (moved){
+      const [lat, lon] = mapLatLon(ev);
+      v3A = {lat: v3Drag.lat, lon: v3Drag.lon}; v3B = {lat, lon}; v3P = null;
+      v3Swallow = Date.now(); redraw(); v3Draw();     // ignore the click this drag may end with
+    }
+    v3Drag = null;
+  });
+});
+
+async function v3Init(){
+  const THREE = await import("three");
+  const {OrbitControls} = await import("three/addons/controls/OrbitControls.js");
+  const {edgeTable, triTable} = await import("three/addons/objects/MarchingCubes.js");
+  const wrap = $("v3-wrap");
+  const renderer = new THREE.WebGLRenderer({antialias: true, preserveDrawingBuffer: true});
+  renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+  renderer.setClearColor(0x111A25);
+  renderer.domElement.id = "v3-canvas";
+  wrap.prepend(renderer.domElement);
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(38, 1.6, 0.1, 6000);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.maxPolarAngle = Math.PI * 0.497;            // never below the floor
+  controls.screenSpacePanning = true;
+  scene.add(new THREE.HemisphereLight(0xE4ECF5, 0x2A3A4E, 1.25));
+  const sun = new THREE.DirectionalLight(0xFFFFFF, 1.35); sun.position.set(-0.6, 1.6, -0.8); scene.add(sun);
+  const world = new THREE.Group(); scene.add(world);
+  V3 = {THREE, renderer, scene, camera, controls, world, edgeTable, triTable, tex: {}};
+  V3.render = () => renderer.render(scene, camera);
+  controls.addEventListener("change", V3.render);
+  if (typeof ResizeObserver !== "undefined") new ResizeObserver(v3Resize).observe(wrap);
+  v3Resize();
+}
+function v3Resize(){
+  if (!V3) return;
+  const w = $("v3-wrap").clientWidth || 800, h = Math.round(Math.min(640, Math.max(360, w * 0.6)));
+  V3.renderer.setSize(w, h); V3.camera.aspect = w / h; V3.camera.updateProjectionMatrix(); V3.render();
+}
+function v3Clear(){
+  if (!V3) return;
+  for (const o of [...V3.world.children]){
+    V3.world.remove(o);
+    o.traverse(c => { if (c.geometry) c.geometry.dispose();
+      if (c.material){ if (c.material.map && !c.material.map.userData.keep) c.material.map.dispose(); c.material.dispose(); } });
+  }
+  V3.render();
+}
+
+async function v3Draw(){
+  const panel = $("v3-panel"), msg = $("v3-msg");
+  panel.hidden = !v3On;
+  if (!v3On || !M) return;
+  const f = frameAt(idx), seq = ++v3Seq;
+  if (!v3A || !v3B){
+    $("v3-sub").textContent = v3A ? "now tap the opposite corner" : "drag a box on either map, or tap two corners";
+    msg.textContent = v3A ? "Tap the opposite corner to close the box - it is made square." :
+      "Drag a box on either map, or tap two corners. The box is made square, like GR2's.";
+    v3Clear(); return;
+  }
+  if (!V3){
+    msg.textContent = "Loading the 3-D viewer…";
+    try { await v3Init(); }
+    catch (e){ msg.textContent = `Could not load the 3-D library from ${V3_CDN} (${e.message}).`; return; }
+  }
+  let vol, dat;
+  try { [vol, dat] = await Promise.all([getVol(f), getData(f)]); }
+  catch (e){ msg.textContent = "Could not load this frame's volume (" + e.message + ")."; return; }
+  if (seq !== v3Seq || frameAt(idx) !== f) return;          // the user moved on while it loaded
+  if (!vol){
+    msg.textContent = "No 3-D volume for this frame. Only the newest frame of each run gets one, " +
+      "so the loop fills in as runs go by; archive-filled frames are 2-D.";
+    v3Clear(); return;
+  }
+  msg.textContent = "";
+  v3Build(f, vol, dat);
+}
+
+// 1-2-1 smoothing along each axis in turn (boundary nodes are left as they are).
+function v3Smooth(F, PX, PY, PZ){
+  const T = new Float32Array(F.length);
+  const axes = [[1, PX, p => p % PX], [PX, PY, p => ((p / PX) | 0) % PY], [PX * PY, PZ, p => (p / (PX * PY)) | 0]];
+  let src = F, dst = T;
+  for (const [s, dim, at] of axes){
+    for (let p = 0; p < src.length; p++){
+      const c = at(p);
+      dst[p] = (c === 0 || c === dim - 1) ? src[p] : 0.25 * src[p - s] + 0.5 * src[p] + 0.25 * src[p + s];
+    }
+    [src, dst] = [dst, src];
+  }
+  if (src !== F) F.set(src);
+}
+
+// Marching cubes on a node grid with coordinates X[x], Y[y] (up), Z[z]; field F indexed
+// (zUp * PY + y) * PX + x with y the north-south index. Indexed geometry via an edge cache.
+const V3_EB = [[0,0,0,0],[1,0,0,1],[0,1,0,0],[0,0,0,1],[0,0,1,0],[1,0,1,1],[0,1,1,0],[0,0,1,1],
+               [0,0,0,2],[1,0,0,2],[1,1,0,2],[0,1,0,2]];      // per edge: lower node offset and axis
+function v3March(F, PX, PY, PZ, iso, X, Zs, Yup, colOf){
+  const {edgeTable, triTable} = V3;
+  const cache = new Int32Array(PX * PY * PZ * 3).fill(-1);
+  const pos = [], idx = [], col = colOf ? [] : null, ev = new Int32Array(12);
+  const node = (x, y, z) => (z * PY + y) * PX + x;
+  const vert = (x, y, z, e) => {
+    const b = V3_EB[e], nx = x + b[0], ny = y + b[1], nz = z + b[2], ax = b[3];
+    const key = node(nx, ny, nz) * 3 + ax;
+    if (cache[key] >= 0) return cache[key];
+    const mx = nx + (ax === 0), my = ny + (ax === 1), mz = nz + (ax === 2);
+    const va = F[node(nx, ny, nz)], vb = F[node(mx, my, mz)];
+    const t = vb !== va ? (iso - va) / (vb - va) : 0.5;
+    const px = X[nx] + (X[mx] - X[nx]) * t, py = Yup[nz] + (Yup[mz] - Yup[nz]) * t, pz = Zs[ny] + (Zs[my] - Zs[ny]) * t;
+    const id = pos.length / 3;
+    pos.push(px, py, pz);
+    if (col){ const c = colOf(t < 0.5 ? nx : mx, t < 0.5 ? ny : my); col.push(c[0], c[1], c[2]); }
+    return (cache[key] = id);
+  };
+  for (let z = 0; z < PZ - 1; z++) for (let y = 0; y < PY - 1; y++) for (let x = 0; x < PX - 1; x++){
+    const q = node(x, y, z), up = PX * PY;
+    let ci = 0;
+    if (F[q] < iso) ci |= 1;               if (F[q + 1] < iso) ci |= 2;
+    if (F[q + 1 + PX] < iso) ci |= 4;      if (F[q + PX] < iso) ci |= 8;
+    if (F[q + up] < iso) ci |= 16;         if (F[q + up + 1] < iso) ci |= 32;
+    if (F[q + up + 1 + PX] < iso) ci |= 64; if (F[q + up + PX] < iso) ci |= 128;
+    const bits = edgeTable[ci];
+    if (!bits) continue;
+    for (let e = 0; e < 12; e++) if (bits & (1 << e)) ev[e] = vert(x, y, z, e);
+    for (let t = ci * 16; triTable[t] !== -1; t += 3) idx.push(ev[triTable[t]], ev[triTable[t + 1]], ev[triTable[t + 2]]);
+  }
+  return {pos, idx, col};
+}
+
+function v3Label(text, h, color){
+  const {THREE} = V3, c = document.createElement("canvas"), px = 48;
+  const x = c.getContext("2d"); x.font = `600 ${px}px "Barlow Condensed", sans-serif`;
+  c.width = Math.ceil(x.measureText(text).width) + 16; c.height = px + 16;
+  x.font = `600 ${px}px "Barlow Condensed", sans-serif`; x.textBaseline = "middle";
+  x.lineWidth = 7; x.strokeStyle = "#111A25"; x.strokeText(text, 8, c.height / 2);
+  x.fillStyle = color || "#E8EEF3"; x.fillText(text, 8, c.height / 2);
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, depthTest: false, transparent: true}));
+  s.scale.set(h * c.width / c.height, h, 1); s.center.set(0, 0.5); s.renderOrder = 999;
+  return s;
+}
+function v3Floor(url, W, D, cx, cz, latc, lonc, kx){
+  const {THREE} = V3;
+  const geo = new THREE.PlaneGeometry(W, D, 24, 24); geo.rotateX(-Math.PI / 2);
+  const P = geo.attributes.position, UV = geo.attributes.uv;
+  for (let v = 0; v < P.count; v++){
+    const lon = lonc + (P.getX(v) + cx) / kx, lat = latc - (P.getZ(v) + cz) / 111.32;
+    const [fx, fy] = toFrac(lat, lon); UV.setXY(v, fx, 1 - fy);
+  }
+  geo.translate(cx, -0.02, cz);
+  let mat;
+  if (url){
+    let tex = V3.tex[url];
+    if (!tex){
+      tex = V3.tex[url] = new THREE.TextureLoader().load(url, () => V3.render());
+      tex.colorSpace = THREE.SRGBColorSpace; tex.userData.keep = true;
+      const keys = Object.keys(V3.tex);                  // keep the last few floors only
+      if (keys.length > 24){ V3.tex[keys[0]].dispose(); delete V3.tex[keys[0]]; }
+    }
+    // the map PNGs are transparent where there is no echo: let the dark base show through
+    mat = new THREE.MeshBasicMaterial({map: tex, transparent: true});
+  } else mat = new THREE.MeshBasicMaterial({color: 0x1B2635});
+  const floor = new THREE.Group(), base = new THREE.PlaneGeometry(W, D);
+  base.rotateX(-Math.PI / 2); base.translate(cx, -0.06, cz);
+  floor.add(new THREE.Mesh(base, new THREE.MeshBasicMaterial({color: 0x1B2635})));
+  const top = new THREE.Mesh(geo, mat); top.renderOrder = -1; floor.add(top);
+  return floor;
+}
+
+function v3Build(f, vol, dat){
+  const {THREE} = V3, g = M.grid, n = g.ny * g.nx, H = M.levels_km, L = H.length;
+  const ex = +$("v3-ex").value, byClass = v3Color === "class";
+  const q = v3Square(v3A, v3B);
+  const cl = (v, a, b) => Math.max(a, Math.min(b, v));
+  const j0 = cl(Math.floor((g.lat_n - q.lat1) / g.dlat), 0, g.ny - 1), j1 = cl(Math.ceil((g.lat_n - q.lat0) / g.dlat), 0, g.ny - 1);
+  const i0 = cl(Math.floor((q.lon0 - g.lon_w) / g.dlon), 0, g.nx - 1), i1 = cl(Math.ceil((q.lon1 - g.lon_w) / g.dlon), 0, g.nx - 1);
+  const st = Math.max(j1 - j0, i1 - i0) + 1 > V3_MAXCELLS ? 2 : 1;
+  const ni = Math.floor((i1 - i0) / st) + 1, nj = Math.floor((j1 - j0) / st) + 1;
+  if (ni < 3 || nj < 3){ $("v3-msg").textContent = "That box is outside the scored area."; v3Clear(); return; }
+  // padded node grid: an empty ring around the box, a ground level at 0 km and one above the top
+  const PX = ni + 2, PY = nj + 2, PZ = L + 2, F = new Float32Array(PX * PY * PZ).fill(V3_EMPTY);
+  let anyEcho = false;
+  for (let k = 0; k < L; k++) for (let jj = 0; jj < nj; jj++) for (let ii = 0; ii < ni; ii++){
+    const v = vol[k * n + (j0 + jj * st) * g.nx + i0 + ii * st];
+    if (v <= 252){ F[((k + 1) * PY + jj + 1) * PX + ii + 1] = Math.max(V3_EMPTY, v / 2); anyEcho = true; }
+  }
+  if ($("v3-smooth").checked) v3Smooth(F, PX, PY, PZ);
+  const latc = (q.lat0 + q.lat1) / 2, lonc = (q.lon0 + q.lon1) / 2, kx = 111.32 * Math.cos(latc * Math.PI / 180);
+  const X = Float32Array.from({length: PX}, (_, p) => (g.lon_w + (i0 + (p - 1) * st) * g.dlon - lonc) * kx);
+  const Zs = Float32Array.from({length: PY}, (_, p) => (latc - (g.lat_n - (j0 + (p - 1) * st) * g.dlat)) * 111.32);
+  const Yup = Float32Array.from({length: PZ}, (_, p) => (p === 0 ? 0 : p <= L ? H[p - 1] : H[L - 1] + 0.5) * ex);
+
+  v3Clear();
+  const world = V3.world, W = X[PX - 2] - X[1], D = Zs[PY - 2] - Zs[1];
+  const cx = (X[PX - 2] + X[1]) / 2, cz = (Zs[PY - 2] + Zs[1]) / 2, S = Math.max(W, D), lab = S * 0.032;
+  const fk = $("v3-floor").value;
+  world.add(v3Floor(fk === "none" ? null : bust(f.images[fk]), W, D, cx, cz, latc, lonc, kx));
+
+  // shells
+  const isos = V3_ISO.filter(v => V3_ON.has(v));
+  const shown = byClass ? isos.slice(0, 1) : isos;
+  const rgb = h => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255];
+  const CLS = M.classes.map(c => rgb((c.color || "#888888").slice(0, 7)));
+  const seen = new Map();
+  const colOf = (px, py) => {
+    const ii = cl(px - 1, 0, ni - 1), jj = cl(py - 1, 0, nj - 1);
+    const id = dat[n + (j0 + jj * st) * g.nx + i0 + ii * st];
+    seen.set(id, (seen.get(id) || 0) + 1);
+    return id > 0 ? CLS[id] : [0.55, 0.6, 0.66];
+  };
+  let tris = 0;
+  const empty = new Set();
+  for (const iso of shown){
+    const m = v3March(F, PX, PY, PZ, iso, X, Zs, Yup, byClass ? colOf : null);
+    if (!m.idx.length){ empty.add(iso); continue; }
+    tris += m.idx.length / 3;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(m.pos, 3));
+    if (m.col) geo.setAttribute("color", new THREE.Float32BufferAttribute(m.col, 3));
+    geo.setIndex(m.idx); geo.computeVertexNormals();
+    const a = byClass ? 0.96 : V3_ALPHA[iso];
+    const mat = new THREE.MeshLambertMaterial({color: byClass ? 0xFFFFFF : (reflColor(iso) || "#04E9E7"),
+      vertexColors: byClass, transparent: a < 0.95, opacity: a, depthWrite: a >= 0.95, side: THREE.DoubleSide});
+    const mesh = new THREE.Mesh(geo, mat); mesh.renderOrder = 100 - iso; mesh.userData.shell = iso;
+    world.add(mesh);
+  }
+
+  // box frame, height ticks, north
+  const ztop = 16 * ex;
+  const frame = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(W, ztop, D)),
+    new THREE.LineBasicMaterial({color: 0x6F8296, transparent: true, opacity: 0.45}));
+  frame.position.set(cx, ztop / 2, cz); world.add(frame);
+  for (const km of [5, 10, 15]){
+    const t = v3Label(`${km} km`, lab, "#9FB2C4"); t.position.set(X[1] - lab * 0.2, km * ex, Zs[PY - 2]); t.center.set(1, 0.5); world.add(t);
+  }
+  const nl = v3Label("N", lab * 1.3); nl.position.set(cx, 0.05, Zs[1] - lab); nl.center.set(0.5, 0.5); world.add(nl);
+
+  // standoff rings around the pads' centre, clipped to the box
+  if ($("rings").checked){
+    const [clat, clon] = centroid(), pts = [];
+    for (const nm of [5, 10]){
+      const r = nm * 1.852, ccx = (clon - lonc) * kx, ccz = (latc - clat) * 111.32;
+      for (let a = 0; a < 128; a++){
+        const p0 = [ccx + r * Math.cos(a / 64 * Math.PI), ccz + r * Math.sin(a / 64 * Math.PI)];
+        const p1 = [ccx + r * Math.cos((a + 1) / 64 * Math.PI), ccz + r * Math.sin((a + 1) / 64 * Math.PI)];
+        const inb = p => p[0] >= X[1] && p[0] <= X[PX - 2] && p[1] >= Zs[1] && p[1] <= Zs[PY - 2];
+        if (inb(p0) && inb(p1)) pts.push(p0[0], 0.03, p0[1], p1[0], 0.03, p1[1]);
+      }
+    }
+    if (pts.length){
+      const gr = new THREE.BufferGeometry(); gr.setAttribute("position", new THREE.Float32BufferAttribute(pts, 3));
+      world.add(new THREE.LineSegments(gr, new THREE.LineBasicMaterial({color: 0xFFFFFF, transparent: true, opacity: 0.7})));
+    }
+  }
+  // pads inside the box: a pin each, one label per group of pads within 8 km of each other
+  const pins = [], groups = [];
+  for (const [name, [plat, plon]] of Object.entries(M.sites)){
+    if (plat < q.lat0 || plat > q.lat1 || plon < q.lon0 || plon > q.lon1) continue;
+    const px = (plon - lonc) * kx, pz = (latc - plat) * 111.32;
+    pins.push(px, 0, pz, px, 1.2 * ex, pz);
+    const gp = groups.find(g => Math.hypot(g.x - px, g.z - pz) < 8);
+    gp ? gp.names.push(name) : groups.push({x: px, z: pz, names: [name]});
+  }
+  if (pins.length){
+    const gl = new THREE.BufferGeometry(); gl.setAttribute("position", new THREE.Float32BufferAttribute(pins, 3));
+    world.add(new THREE.LineSegments(gl, new THREE.LineBasicMaterial({color: 0xFFFFFF})));
+  }
+  for (const gp of groups){
+    const t = v3Label(gp.names.length > 1 ? `${gp.names[0]} +${gp.names.length - 1}` : gp.names[0], lab * 0.8);
+    t.position.set(gp.x, 1.2 * ex, gp.z); world.add(t);
+  }
+  // isotherm planes: from the XMR model sounding when the frame has one, else the two estimates
+  if ($("v3-isot").checked){
+    const I = f.isotherms_km, z0e = f.freezing_km || 4.8;
+    const iso = I
+      ? [["+0", "0 °C"], ["-10", "−10 °C"], ["-20", "−20 °C"]].filter(([k]) => I[k] != null).map(([k, l]) => [I[k], l])
+      : [[z0e, "0 °C (est.)"], [z0e + 20 / 6.5, "−20 °C (est.)"]];
+    for (const [z, l] of iso){
+      const pg = new THREE.PlaneGeometry(W, D); pg.rotateX(-Math.PI / 2); pg.translate(cx, z * ex, cz);
+      world.add(new THREE.Mesh(pg, new THREE.MeshBasicMaterial({color: 0xE8EEF3, transparent: true, opacity: 0.06,
+        depthWrite: false, side: THREE.DoubleSide})));
+      const eg = new THREE.EdgesGeometry(pg);
+      world.add(new THREE.LineSegments(eg, new THREE.LineBasicMaterial({color: 0xE8EEF3, transparent: true, opacity: 0.55})));
+      const t = v3Label(l, lab * 0.9); t.position.set(X[PX - 2] + lab * 0.3, z * ex, Zs[1]); world.add(t);
+    }
+  }
+
+  // camera: reset when the box changes, kept while frames play or settings change
+  const key = `${q.lat0.toFixed(4)},${q.lon0.toFixed(4)},${q.km.toFixed(2)}`;
+  V3.box = {cx, cz, S, ex};
+  if (key !== v3Key){ v3Key = key; v3ResetCam(); }
+  V3.render();
+
+  // header, legend, note
+  $("v3-sub").textContent = `${(q.km / 1.852).toFixed(0)} nmi square · frame ${hhmm(f.valid)} · heights ×${ex}` +
+    (st > 1 ? " · every other cell" : "");
+  if (byClass){
+    const present = M.classes.filter(c => c.id > 0 && seen.has(c.id))
+      .sort((a, b) => seen.get(b.id) - seen.get(a.id));
+    $("v3-legend").innerHTML = `<span>${isos.length ? isos[0] : 0} dBZ shell coloured by cloud class:</span>` +
+      present.map(c => `<span><i style="background:${c.color}"></i>${c.name}</span>`).join("");
+  } else {
+    $("v3-legend").innerHTML = shown.map(v => `<span${empty.has(v) ? ' style="opacity:.5"' : ""}><i style="background:${reflColor(v)}"></i>` +
+      `${v} dBZ${empty.has(v) ? " (none in box)" : ""}</span>`).join("");
+  }
+  $("v3-note").textContent = !anyEcho ? "No echo in this box on this frame." :
+    !tris ? "No echo reaches the chosen levels in this box." :
+    `${f.volume_note || "3-D volume"}. Each column has one cloud class, so in class colours the whole ` +
+    `shell above a column shares it. Grid ~1 km × the volume's levels - softer than GR2's native gates.`;
+}
+function v3ResetCam(){
+  if (!V3 || !V3.box) return;
+  const {cx, cz, S, ex} = V3.box, d = S * 1.35;
+  V3.controls.target.set(cx, 4 * ex, cz);
+  V3.camera.position.set(cx + d * 0.35, d * 0.75, cz + d * 1.05);      // from the south-southeast, looking north
+  V3.controls.update(); V3.render();
+}
+
+// controls
+$("v3-isos").innerHTML = V3_ISO.map(v =>
+  `<label class="chk"><input type="checkbox" data-iso="${v}"${V3_ON.has(v) ? " checked" : ""}> ${v}</label>`).join("") + " <small>dBZ</small>";
+document.querySelectorAll("#v3-isos input").forEach(el => el.onchange = () => {
+  const v = +el.dataset.iso; el.checked ? V3_ON.add(v) : V3_ON.delete(v); v3Draw(); });
+$("v3-dbz").onclick = () => { v3Color = "dbz"; press("v3-dbz", "v3-cls"); v3Draw(); };
+$("v3-cls").onclick = () => { v3Color = "class"; press("v3-cls", "v3-dbz"); v3Draw(); };
+$("v3-ex").oninput = () => { $("v3-exv").textContent = $("v3-ex").value; v3Draw(); };
+["v3-floor", "v3-smooth", "v3-isot"].forEach(id => $(id).onchange = () => v3Draw());
+$("v3-reset").onclick = v3ResetCam;
+$("v3-btn").onclick = () => {
+  v3On = !v3On;
+  $("v3-btn").setAttribute("aria-pressed", String(v3On));
+  if (v3On && xsOn){ xsOn = false; $("xs-btn").setAttribute("aria-pressed", "false"); xsA = xsB = null; xsT = null; xsHover = null; drawSection(); }
+  if (!v3On){ v3A = v3B = v3P = null; v3Drag = null; }
+  redraw(); v3Draw();
+  if (v3On) $("v3-panel").scrollIntoView({behavior: "smooth", block: "nearest"});
 };
 
 function start(){ $("play").textContent = "Pause";
